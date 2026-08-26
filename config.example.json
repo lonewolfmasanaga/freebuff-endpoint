@@ -1,0 +1,12 @@
+{
+  "LISTEN_ADDR": "127.0.0.1:8090",
+  "UPSTREAM_BASE_URL": "https://www.codebuff.com",
+  "AUTH_TOKENS": [],
+  "API_KEYS": [],
+  "PROXY_URL": "",
+  "REQUEST_TIMEOUT_MS": 900000,
+  "ROTATION_INTERVAL_MIN": 360,
+  "DEBOUNCE_MS": 1100,
+  "REGISTRY_REFRESH_MIN": 180,
+  "POOL_FALLBACK_MODEL": "deepseek/deepseek-v4-flash"
+}

@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Freebuff Endpoint</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --fg: #e6edf3; --muted: #8b949e; --accent: #3fb950; --warn: #d29922; --err: #f85149;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    padding: 24px; max-width: 880px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+  h1 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); }
+  h1 .dot.ok { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  h1 small { color: var(--muted); font-weight: 400; font-size: 13px; }
+  section {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-top: 16px;
+  }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .stat .v { font-size: 22px; font-weight: 600; }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: none; }
+  code { background: #21262d; border-radius: 5px; padding: 2px 7px; font-size: 13px; font-family: ui-monospace, Consolas, monospace; }
+  .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 99px; padding: 2px 9px; }
+  input, select, button, textarea {
+    font: inherit; color: var(--fg); background: #21262d;
+    border: 1px solid var(--border); border-radius: 7px; padding: 8px 12px;
+  }
+  input:focus, textarea:focus { outline: 1px solid var(--accent); }
+  button { cursor: pointer; }
+  button.primary { background: #238636; border-color: #2ea043; }
+  button.danger { background: transparent; border-color: var(--err); color: var(--err); }
+  button:hover { filter: brightness(1.15); }
+  .addform { display: flex; gap: 8px; margin-top: 12px; }
+  .addform input { flex: 1; font-family: ui-monospace, Consolas, monospace; }
+  .testform textarea { width: 100%; min-height: 64px; resize: vertical; margin-bottom: 8px; }
+  .testform .controls { display: flex; gap: 8px; align-items: center; }
+  .testform select { flex: 1; }
+  .reply { margin-top: 12px; white-space: pre-wrap; font-family: ui-monospace, Consolas, monospace; font-size: 13px; line-height: 1.5; color: var(--fg); background: #0d1117; border: 1px solid var(--border); border-radius: 7px; padding: 12px; display: none; }
+  .reply.show { display: block; }
+  .reply.err { color: var(--err); }
+  .note { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.5; }
+  .spin { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  footer { margin-top: 18px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+  footer code { font-size: 11px; }
+</style>
+</head>
+<body>
+  <h1><span class="dot" id="dot"></span> Freebuff Endpoint <small id="subtitle">checking…</small></h1>
+
+  <section>
+    <h2>Status</h2>
+    <div class="grid" id="stats"></div>
+  </section>
+
+  <section>
+    <h2>Auth tokens</h2>
+    <div id="tokenlist"><span class="note">loading…</span></div>
+    <div class="addform">
+      <input id="newToken" type="password" placeholder="Paste a new auth token…" autocomplete="off">
+      <button class="primary" id="addBtn">Add token</button>
+    </div>
+    <p class="note">Tokens are saved to <code>config.json</code> and applied instantly — no restart needed. Get a token by logging in with the Freebuff CLI or from your account settings.</p>
+  </section>
+
+  <section>
+    <h2>Test chat</h2>
+    <div class="testform">
+      <textarea id="prompt" placeholder="Ask something…">Reply with exactly: READY</textarea>
+      <div class="controls">
+        <select id="model"></select>
+        <button class="primary" id="sendBtn">Send</button>
+      </div>
+      <div class="reply" id="reply"></div>
+    </div>
+  </section>
+
+  <footer>
+    OpenAI surface: <code>POST http://127.0.0.1:8090/v1/chat/completions</code> ·
+    Anthropic surface: <code>POST http://127.0.0.1:8090/v1/messages</code> ·
+    Health JSON: <code>/health</code>, <code>/status</code> ·
+    Runs hidden at login via the <code>FreebuffEndpoint</code> scheduled task.
+  </footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function api(path, opts) {
+  const r = await fetch(path, { headers: { 'content-type': 'application/json' }, ...opts });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok && !body.error) throw new Error(`HTTP ${r.status}`);
+  return { ok: r.ok, status: r.status, body };
+}
+
+async function loadStatus() {
+  try {
+    const { body } = await api('/health');
+    $('dot').classList.add('ok');
+    $('subtitle').textContent = `${body.proxy} · ${body.tokens} token(s) · ${body.models} models`;
+    $('stats').innerHTML = [
+      ['status', body.status],
+      ['tokens', body.tokens],
+      ['models', body.models],
+      ['egress', body.proxy.replace(' proxy ', '<br>proxy ')],
+      ['cli', body.cli_version_tracked],
+    ].map(([k, v]) => `<div class="stat"><div class="v">${v}</div><div class="k">${k}</div></div>`).join('');
+  } catch {
+    $('dot').classList.remove('ok');
+    $('subtitle').textContent = 'unreachable';
+  }
+}
+
+async function loadModels() {
+  try {
+    const { body } = await api('/v1/models');
+    const sel = $('model');
+    sel.innerHTML = body.data.map((m) => `<option value="${m.id}">${m.id}</option>`).join('');
+  } catch { /* status panel will show the problem */ }
+}
+
+async function loadTokens() {
+  const el = $('tokenlist');
+  try {
+    const { body } = await api('/admin/tokens');
+    if (!body.tokens.length) {
+      el.innerHTML = '<span class="note">No tokens yet — paste one below to go live.</span>';
+      return;
+    }
+    el.innerHTML = body.tokens.map((t) => `
+      <div class="row">
+        <code>${t.masked}</code>
+        <span style="display:flex;gap:10px;align-items:center;">
+          <span class="tag">${t.source}</span>
+          ${t.source === 'config.json' ? `<button class="danger" data-id="${t.id}" onclick="removeToken(this)">Remove</button>` : ''}
+        </span>
+      </div>`).join('');
+  } catch (e) {
+    el.innerHTML = `<span class="note" style="color:var(--err)">failed to load: ${e.message}</span>`;
+  }
+}
+
+// Deletion goes by opaque id — the server resolves it back to the token.
+window.removeToken = async (btn) => {
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const { ok, body: rb } = await api('/admin/tokens', {
+      method: 'DELETE',
+      body: JSON.stringify({ id: btn.dataset.id }),
+    });
+    if (!ok) throw new Error(rb.error?.message || 'remove failed');
+    await refreshAll();
+  } catch (e) {
+    btn.textContent = 'failed';
+    setTimeout(() => { btn.textContent = 'Remove'; btn.disabled = false; }, 2000);
+  }
+};
+
+$('addBtn').onclick = async () => {
+  const inp = $('newToken');
+  const token = inp.value.trim();
+  if (!token) return;
+  const btn = $('addBtn');
+  btn.disabled = true; btn.textContent = 'Adding…';
+  try {
+    const { ok, body } = await api('/admin/tokens', { method: 'POST', body: JSON.stringify({ token }) });
+    if (!ok) throw new Error(body.error?.message || 'add failed');
+    inp.value = '';
+    await refreshAll();
+  } catch (e) {
+    alert(`Could not add token: ${e.message}`);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Add token';
+  }
+};
+
+$('sendBtn').onclick = async () => {
+  const btn = $('sendBtn');
+  const rep = $('reply');
+  btn.disabled = true;
+  rep.className = 'reply show';
+  rep.textContent = '⠋ thinking…';
+  const spin = setInterval(() => { rep.textContent = '⠋ thinking' + '.'.repeat(1 + (Date.now() / 500 | 0) % 3); }, 300);
+  try {
+    const { ok, body } = await api('/admin/test', {
+      method: 'POST',
+      body: JSON.stringify({ model: $('model').value, prompt: $('prompt').value }),
+    });
+    clearInterval(spin);
+    if (!ok) throw new Error(body.error?.message || `HTTP error`);
+    rep.className = 'reply show';
+    rep.textContent = body.reply || '(empty reply)';
+    if (body.served_by) rep.textContent += `\n\n— served by ${body.served_by.served_by} (${body.served_by.reason})`;
+  } catch (e) {
+    clearInterval(spin);
+    rep.className = 'reply show err';
+    rep.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+async function refreshAll() {
+  await Promise.all([loadStatus(), loadTokens(), loadModels()]);
+}
+refreshAll();
+setInterval(loadStatus, 10000);
+</script>
+</body>
+</html>

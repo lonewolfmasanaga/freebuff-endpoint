@@ -1,0 +1,10 @@
+# Fresh-machine setup (no git history needed)
+node_modules/
+logs/
+data/
+
+# Local secrets — never ship
+config.json
+*.log
+config.json*
+*.user-backup
