@@ -1,4 +1,4 @@
-# Freebuff Endpoint — one-shot installer (run from anywhere)
+# Freebuff Endpoint - one-shot installer (run from anywhere)
 #
 #   powershell -ExecutionPolicy Bypass -File setup.ps1
 #
