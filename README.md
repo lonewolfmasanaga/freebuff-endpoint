@@ -72,8 +72,21 @@ Full defaults in `src/config.js`.
 ```powershell
 Stop-Process -Name node -Force                                   # stop
 & "$env:USERPROFILE\freebuff-endpoint\install-windows.ps1"       # reinstall/restart
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\freebuff-endpoint\uninstall.ps1" -Wipe   # full uninstall
 ```
+
+### Uninstall — same way you installed
+
+**Just stop it (autostart off, files kept):**
+```powershell
+irm https://raw.githubusercontent.com/lonewolfmasanaga/freebuff-endpoint/main/uninstall.ps1 -OutFile uninstall.ps1; powershell -ExecutionPolicy Bypass -File uninstall.ps1; Remove-Item uninstall.ps1
+```
+
+**Complete removal (stops everything and deletes the install folder incl. config/tokens):**
+```powershell
+irm https://raw.githubusercontent.com/lonewolfmasanaga/freebuff-endpoint/main/uninstall.ps1 -OutFile uninstall.ps1; powershell -ExecutionPolicy Bypass -File uninstall.ps1 -Full; Remove-Item uninstall.ps1
+```
+
+The uninstaller only kills the gateway's own process (by port 8090) and its watchdog — never other Node apps. Re-running the installer later brings everything back.
 
 The service runs hidden at every login and restarts itself within ~5s of a crash. Logs: `logs\gateway.log` (auto-rotates).
 

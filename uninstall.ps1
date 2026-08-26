@@ -1,38 +1,88 @@
-# Teardown — remove Freebuff Endpoint from this machine completely
+# Freebuff Endpoint — uninstaller (works standalone OR from inside the repo)
 #
-#   powershell -ExecutionPolicy Bypass -File uninstall.ps1          # remove service + stop server
-#   powershell -ExecutionPolicy Bypass -File uninstall.ps1 -Wipe    # ALSO delete config/logs/data (keeps this folder's code)
+# Same energy as the installer: download & run from anywhere.
 #
-# Then just delete the project folder itself. Nothing is installed anywhere
-# else on the system: no registry entries, no services, no admin artifacts.
+#   Stop autostart + gateway, keep files:
+#     powershell -ExecutionPolicy Bypass -File uninstall.ps1
+#
+#   Complete removal (also deletes the install folder incl. config/tokens):
+#     powershell -ExecutionPolicy Bypass -File uninstall.ps1 -Full
+#
+# One-line remote versions are in the README.
 
-param([switch]$Wipe)
+param(
+  [switch]$Full,
+  [string]$Dir = ""
+)
 
-$ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ErrorActionPreference = "SilentlyContinue"
+
+# Locate the install: prefer the folder we're sitting in, else the default.
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ($Dir) { $Install = $Dir }
+elseif ((Test-Path (Join-Path $here "package.json")) -and (Test-Path (Join-Path $here "src"))) { $Install = $here }
+else { $Install = Join-Path $env:USERPROFILE "freebuff-endpoint" }
+
 $Startup = [Environment]::GetFolderPath('Startup')
 $LauncherVbs = Join-Path $Startup "freebuff-endpoint.vbs"
 
-Write-Host "Stopping gateway…"
-Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Write-Host "== Freebuff Endpoint uninstaller ==" -ForegroundColor Cyan
+Write-Host "Target install: $Install"
 
-Write-Host "Removing auto-start launcher…"
+# 1. Remove the auto-start launcher FIRST so nothing respawns.
 Remove-Item -Force $LauncherVbs -ErrorAction SilentlyContinue
+if (Test-Path $LauncherVbs) { Write-Host "WARN: could not remove $LauncherVbs" -ForegroundColor Yellow } else { Write-Host "Autostart removed." }
 
-# Belt and suspenders: remove the task too, if it ever existed.
-Unregister-ScheduledTask -TaskName "FreebuffEndpoint" -Confirm:$false -ErrorAction SilentlyContinue
-
-if ($Wipe) {
-  Remove-Item -Recurse -Force (Join-Path $ProjectDir "logs") -ErrorAction SilentlyContinue
-  Remove-Item -Recurse -Force (Join-Path $ProjectDir "data") -ErrorAction SilentlyContinue
-  Write-Host "Wiped logs, data cache, and local config backup."
-  Write-Host "(config.json kept only if you answer No at the prompt below.)"
-  $ans = Read-Host "Also delete config.json (contains your tokens/proxy)? y/N"
-  if ($ans -match '^[Yy]') {
-    Remove-Item -Force (Join-Path $ProjectDir "config.json") -ErrorAction SilentlyContinue
-    Write-Host "config.json deleted."
+# 2. Kill the watchdog (cmd.exe hosting runner.cmd) — otherwise it resurrects node.
+Get-CimInstance Win32_Process -Filter "Name='cmd.exe' OR Name='wscript.exe'" |
+  Where-Object { $_.CommandLine -match 'runner\.cmd|freebuff-endpoint' } |
+  ForEach-Object {
+    Write-Host "Stopping watchdog (pid $($_.ProcessId))..."
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
   }
+
+# 3. Kill ONLY the gateway's node process (by port) — never other node apps.
+$conns = Get-NetTCPConnection -LocalPort 8090 -State Listen -ErrorAction SilentlyContinue
+if ($conns) {
+  $pids = $conns.OwningProcess | Sort-Object -Unique
+  foreach ($p in $pids) {
+    Write-Host "Stopping gateway node process (pid $p)..."
+    Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+  }
+} else {
+  Write-Host "Gateway not currently listening."
 }
 
-Write-Host ""
-Write-Host "Service removed. To finish, delete the project folder itself:" -ForegroundColor Green
-Write-Host "  $ProjectDir"
+# Belt-and-suspenders: scheduled task from older installs.
+Unregister-ScheduledTask -TaskName "FreebuffEndpoint" -Confirm:$false -ErrorAction SilentlyContinue
+
+Start-Sleep -Seconds 2
+$stillUp = Get-NetTCPConnection -LocalPort 8090 -State Listen -ErrorAction SilentlyContinue
+if ($stillUp) {
+  Write-Host "WARN: something still listens on 8090 (maybe another app)." -ForegroundColor Yellow
+} else {
+  Write-Host "Gateway stopped."
+}
+
+# 4. Optional: full removal.
+if ($Full) {
+  if (Test-Path $Install) {
+    # Never delete unless it really looks like our install.
+    $looksRight = (Test-Path (Join-Path $Install "src\server.js")) -or (Test-Path (Join-Path $Install "package.json"))
+    if (-not $looksRight) {
+      Write-Host "Refusing to delete '$Install' — it doesn't look like a Freebuff Endpoint install." -ForegroundColor Red
+      exit 1
+    }
+    Remove-Item -Recurse -Force $Install
+    if (Test-Path $Install) { Write-Host "WARN: folder could not be fully removed (a file may be locked)." -ForegroundColor Yellow }
+    else { Write-Host "Deleted $Install (config, tokens, logs, cache included)." }
+  } else {
+    Write-Host "Nothing to delete at $Install."
+  }
+  Write-Host ""
+  Write-Host "FULLY REMOVED. Zero traces left on this machine." -ForegroundColor Green
+} else {
+  Write-Host ""
+  Write-Host "STOPPED. Files remain at $Install (tokens/config kept)." -ForegroundColor Green
+  Write-Host "Remove completely: add -Full   |   Restart later: re-run the installer."
+}
