@@ -1,7 +1,6 @@
 // Freebuff Endpoint — OpenAI + Anthropic compatible gateway for Freebuff's free models.
 import http from 'node:http';
-import crypto from 'node:crypto';
-import { config, resolveTokens, saveConfig, detectCliToken } from './config.js';
+import { config, resolveTokens, saveConfig } from './config.js';
 import { configureProxy, proxyDescription, currentCliVersion } from './http-client.js';
 import { ModelRegistry } from './registry.js';
 import { RunManager } from './runs.js';
@@ -32,31 +31,12 @@ if (!tokens.length) {
 log.info(`${tokens.length} auth token(s) loaded`);
 
 const registry = new ModelRegistry(log);
-registry.start(config.REGISTRY_REFRESH_MIN);
+registry.start();
 
 const runs = new RunManager(log, config);
 runs.setTokens(tokens);
 
 let shuttingDown = false;
-
-// Opaque id <-> token maps for the dashboard (never ship raw tokens back).
-const tokenIdByValue = new Map();
-const tokenValueById = new Map();
-
-// Optional prewarm: session + a default-agent run so first request is fast.
-(async () => {
-  try {
-    const prewarmModel = (config.PREWARM_MODEL || '').trim() || registry.models()[0];
-    const agent = prewarmModel ? registry.agentForModel(prewarmModel) : null;
-    if (agent) {
-      const l = await runs.acquire(agent);
-      runs.release(l);
-    }
-    log.info('prewarmed free session');
-  } catch (e) {
-    log.warn(`prewarm skipped: ${e.message}`);
-  }
-})();
 
 // ---- helpers ----------------------------------------------------------------
 const BODY_LIMIT = 5_000_000; // 5MB is generous for chat payloads
@@ -285,104 +265,27 @@ async function handleRequest(req, res) {
     return sendDashboard(res);
   }
 
-  // ---------- Admin API (dashboard) ----------
-  if (p === '/admin/tokens' && req.method === 'GET') {
-    const cli = detectCliToken();
-    const seen = new Set();
-    const entries = [];
-    for (const [t, source] of [
-      ...config.AUTH_TOKENS.map((t) => [t, 'config.json']),
-      ...(cli && !config.AUTH_TOKENS_OVERRIDE_CLI ? [[cli, 'CLI auto-detect']] : []),
-    ]) {
-      if (seen.has(t)) continue;
-      seen.add(t);
-      // Opaque id -> full token map lets the GUI delete without ever
-      // shipping raw tokens back over the wire.
-      let id = tokenIdByValue.get(t);
-      if (!id) {
-        id = crypto.randomBytes(8).toString('hex');
-        tokenIdByValue.set(t, id);
-        tokenValueById.set(id, t);
-      }
-      entries.push({ id, masked: maskToken(t), source });
-    }
-    return sendJson(res, 200, { tokens: entries });
+  // ---------- Proxy (live egress switch, dashboard) ----------
+  if (p === '/admin/proxy' && req.method === 'GET') {
+    return sendJson(res, 200, { proxy: proxyDescription, configured: config.PROXY_URL || '' });
   }
 
-  if (p === '/admin/tokens' && req.method === 'POST') {
+  if (p === '/admin/proxy' && req.method === 'POST') {
     const body = await parseJsonObject(req, res, (m) => openaiError(m, 'invalid_request'));
     if (!body) return;
-    const token = typeof body.token === 'string' ? body.token.trim() : '';
-    if (token.length < 10) return sendJson(res, 400, openaiError('token looks invalid (too short)', 'invalid_request'));
-    const configuredList = [...new Set([...(config.AUTH_TOKENS || []), token])];
-    // Live set also includes the CLI-detected token unless overridden.
-    const liveList = [...new Set([...resolveTokens(), token])];
-    saveConfig({ AUTH_TOKENS: configuredList });
-    await runs.setTokens(liveList);
-    log.info(`token added via dashboard (${maskToken(token)}), ${liveList.length} active`);
-    return sendJson(res, 200, { ok: true, count: liveList.length });
-  }
-
-  if (p === '/admin/tokens' && req.method === 'DELETE') {
-    const body = await parseJsonObject(req, res, (m) => openaiError(m, 'invalid_request'));
-    if (!body) return;
-    const id = typeof body.id === 'string' ? body.id : '';
-    const token = tokenValueById.get(id);
-    if (!token) return sendJson(res, 404, openaiError('unknown token id (stale list?) — refresh', 'not_found'));
-    const cli = detectCliToken();
-    if (cli && token === cli && !config.AUTH_TOKENS.includes(cli)) {
-      // The CLI-detected token is disabled via an override flag, otherwise it
-      // would resurrect on every restart.
-      saveConfig({ AUTH_TOKENS_OVERRIDE_CLI: true });
-      config.AUTH_TOKENS_OVERRIDE_CLI = true;
-      log.info('CLI auto-detect token disabled via dashboard');
-    } else {
-      saveConfig({ AUTH_TOKENS: (config.AUTH_TOKENS || []).filter((t) => t !== token) });
+    const raw = typeof body.proxyUrl === 'string' ? body.proxyUrl.trim() : '';
+    const result = configureProxy(raw);
+    if (!result.ok) {
+      return sendJson(res, 400, openaiError(result.error || 'invalid proxy URL', 'invalid_request'));
     }
-    const liveList = resolveTokens().filter((t) => t !== token);
-    await runs.setTokens(liveList);
-    tokenIdByValue.delete(token);
-    tokenValueById.delete(id);
-    log.info(`token removed via dashboard (${maskToken(token)}), ${liveList.length} active`);
-    return sendJson(res, 200, { ok: true, count: liveList.length });
-  }
-
-  if (p === '/admin/test' && req.method === 'POST') {
-    if (shuttingDown) return sendJson(res, 503, openaiError('server shutting down', 'unavailable'));
-    const body = await parseJsonObject(req, res, (m) => openaiError(m, 'invalid_request'));
-    if (!body) return;
-    const model = typeof body.model === 'string' ? body.model : registry.models()[0];
-    const fb = (config.POOL_FALLBACK_MODEL || '').trim();
-    const fallback = fb && fb !== model && registry.has(fb) ? { preferredModel: fb, used: false } : null;
-    const result = await runCompletion({
-      registry,
-      runs,
-      log,
-      model,
-      payload: { model, messages: [{ role: 'user', content: String(body.prompt || 'Say READY.') }], max_tokens: 300 },
-      wantStream: false,
-      signal: requestSignal(req),
-      fallback,
-    });
-    if (result.kind !== 'json' || result.status !== 200) {
-      const msg = result.body?.error?.message || 'upstream error';
-      return sendJson(res, result.status >= 400 ? result.status : 502, openaiError(msg, 'upstream_error'));
-    }
-    return sendJson(res, 200, {
-      ok: true,
-      model: result.body.model,
-      reply: result.body.choices?.[0]?.message?.content ?? '',
-      served_by: result.body.freebuff_served_by ?? null,
-    });
+    config.PROXY_URL = raw;
+    saveConfig({ PROXY_URL: raw });
+    log.info(`egress switched via dashboard: ${proxyDescription}`);
+    return sendJson(res, 200, { ok: true, proxy: proxyDescription });
   }
 
   return sendJson(res, 404, openaiError(`no route: ${req.method} ${p}`, 'not_found'));
 }
-
-function maskToken(t) {
-  return t ? `${t.slice(0, 6)}…${t.slice(-4)}` : '(none)';
-}
-
 
 function res_on_error(server) {
   server.on('clientError', (err, socket) => {
@@ -398,7 +301,7 @@ function res_on_error(server) {
 server.listen(...parseListen(config.LISTEN_ADDR), () => {
   log.info(`freebuff-endpoint listening on ${config.LISTEN_ADDR}`);
   log.info(`upstream: ${config.UPSTREAM_BASE_URL} | egress: ${proxyDescription}`);
-  log.info(`models: ${registry.models().length} (fallback until first sync)`);
+  log.info(`models: ${registry.models().length} (static map)`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

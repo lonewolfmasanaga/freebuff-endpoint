@@ -7,7 +7,6 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const CONFIG_PATH = process.env.FREEBUFF_CONFIG || path.join(ROOT, 'config.json');
 
 function manicodeDir() {
-  // Docker mounts the host's credentials at MANICODE_CREDS_DIR.
   return process.env.MANICODE_CREDS_DIR || path.join(os.homedir(), '.config', 'manicode');
 }
 export { manicodeDir };
@@ -21,10 +20,9 @@ const defaults = {
   REQUEST_TIMEOUT_MS: 900_000,
   ROTATION_INTERVAL_MIN: 360,
   DEBOUNCE_MS: 1100,
-  REGISTRY_REFRESH_MIN: 180,
-  POOL_FALLBACK_MODEL: 'deepseek/deepseek-v4-flash', // reroute earned-pool models here when empty; '' disables
+  // Earned-pool reroute targets (read-only legacy keys; see openai.js fallback).
+  POOL_FALLBACK_MODEL: 'deepseek/deepseek-v4-flash',
   POOL_FALLBACK_ELIGIBLE: ['deepseek/deepseek-v4-flash', 'minimax/minimax-m2.7', 'mimo/mimo-v2.5'],
-  PREWARM_MODEL: 'minimax/minimax-m2.7', // '' disables boot-time session prewarm
 };
 
 function loadFile() {
@@ -78,7 +76,6 @@ if (typeof config.PROXY_URL !== 'string') {
   console.warn('[config] PROXY_URL has invalid type; ignoring');
   config.PROXY_URL = '';
 }
-if (typeof config.POOL_FALLBACK_MODEL !== 'string') config.POOL_FALLBACK_MODEL = '';
 
 // Auto-detect the locally installed Freebuff CLI's auth token when none provided.
 let cachedCliToken; // undefined until first resolve — memoized, not re-read per call

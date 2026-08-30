@@ -7,6 +7,6 @@
   "REQUEST_TIMEOUT_MS": 900000,
   "ROTATION_INTERVAL_MIN": 360,
   "DEBOUNCE_MS": 1100,
-  "REGISTRY_REFRESH_MIN": 180,
-  "POOL_FALLBACK_MODEL": "deepseek/deepseek-v4-flash"
-}
+  "POOL_FALLBACK_MODEL": "deepseek/deepseek-v4-flash",
+  "POOL_FALLBACK_ELIGIBLE": ["deepseek/deepseek-v4-flash", "minimax/minimax-m2.7", "mimo/mimo-v2.5"]
+}
