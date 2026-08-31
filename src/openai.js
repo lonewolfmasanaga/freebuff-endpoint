@@ -220,6 +220,49 @@ export async function runCompletion({ registry, runs, log, model, payload, wantS
       }
       if (e?.name === 'AbortError') throw e;
       if (e.name === 'WaitingRoomError') {
+        // The free tier queued us and didn't clear within the patience budget.
+        // If an unlimited standby is wired and unused, re-route to it — the
+        // queue exists precisely because the requested model's tier is busy,
+        // and the standby skips it (same remedy as the pool-exhausted path).
+        // Otherwise surface 503 + retry-after so the client backs off.
+        const alt = fallback?.preferredModel;
+        if (
+          fallback &&
+          !fallback.used &&
+          alt &&
+          alt !== model &&
+          FALLBACK_ELIGIBLE.has(alt) &&
+          registry.agentForModel(alt)
+        ) {
+          fallback.used = true;
+          // Drop the queued session so the standby re-admits fresh instead of
+          // inheriting a session bound to the queued-for model.
+          try {
+            await runs.sessions.end(runs.token).catch(() => {});
+          } catch { /* best effort */ }
+          const note = { requested: model, served_by: alt, reason: 'waiting_room' };
+          log.warn(`waiting room for ${model} (pos ${e.position}/${e.queueDepth}); falling back to ${alt}`);
+          const r = await runCompletion({
+            registry,
+            runs,
+            log,
+            model: alt,
+            payload: { ...payload, model: alt },
+            wantStream,
+            signal,
+            fallback,
+          });
+          if (r.kind === 'json' && r.body && !r.body.error) {
+            r.body.freebuff_served_by = note;
+            r.headers = { ...(r.headers || {}), 'x-freebuff-served-by': alt };
+          } else if (r.kind === 'sse') {
+            // Streams can't carry a JSON note; expose the reroute on the result
+            // so the HTTP layer can set response headers before pumping.
+            r.headers = { 'x-freebuff-served-by': alt };
+            r.servedBy = note;
+          }
+          return r;
+        }
         return {
           kind: 'json',
           status: 503,

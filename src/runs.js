@@ -14,7 +14,7 @@ export class RunManager {
     this.log = logger;
     this.cfg = config;
     this.upstream = new Upstream(logger, config.DEBOUNCE_MS);
-    this.sessions = new SessionManager(logger, { debounceMs: config.DEBOUNCE_MS });
+    this.sessions = new SessionManager(logger, { debounceMs: config.DEBOUNCE_MS, maxQueueWaitMs: config.WAITING_ROOM_MAX_WAIT_MS });
     this.token = null;
     this.runs = new Map(); // agentId -> { id, startedAt, inflight, requests }
     this.shuttingDown = false;

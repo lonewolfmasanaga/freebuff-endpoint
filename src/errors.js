@@ -53,7 +53,7 @@ const HINTS = {
   model_not_found:
     'Run GET /v1/models for this gateway\'s list and pick a valid model id.',
   waiting_room_queued:
-    'Freebuff\'s free tier is busy — retry in a few seconds, or switch to an unlimited model (mimo/mimo-v2.5, deepseek/deepseek-v4-flash) to skip the queue.',
+    'Freebuff\'s free tier stayed busy after waiting — retry in a few seconds, or switch to an unlimited model (mimo/mimo-v2.5, deepseek/deepseek-v4-flash) to skip the queue.',
   insufficient_quota:
     'Your pool for this model is exhausted for now — switch to an unlimited model (mimo/mimo-v2.5, deepseek/deepseek-v4-flash), or come back after the pool resets.',
   rate_limit_exceeded:
@@ -85,4 +85,4 @@ export function describeError(code, cause = '') {
     hint,
     message: cause || 'an error occurred while handling your request',
   };
-}
+}

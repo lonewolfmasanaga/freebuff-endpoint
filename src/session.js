@@ -20,9 +20,10 @@ const REGION_BLOCKED_STATUSES = new Set([
 ]);
 
 export class SessionManager {
-  constructor(logger, { debounceMs = 0 } = {}) {
+  constructor(logger, { debounceMs = 0, maxQueueWaitMs = 120_000 } = {}) {
     this.log = logger;
     this.debounceMs = debounceMs;
+    this.maxQueueWaitMs = maxQueueWaitMs;
     // token -> { status, instanceId, expiresAt(ms), model, position, queueDepth, retryAt(ms), lastError }
     this.sessions = new Map();
     this.warnedExpiryParse = false;
@@ -69,18 +70,30 @@ export class SessionManager {
     // unknown we defer to admission-time binding + the model_locked recovery
     // path rather than hammering the admission endpoint speculatively.
     let cur = this.sessions.get(token);
-    if (model && cur && cur.status === 'active' && cur.model && cur.model !== model) {
+    if (model && cur && cur.model && cur.model !== model && (cur.status === 'active' || cur.status === 'queued')) {
       await this.end(token);
       cur = undefined;
     }
-    for (let hop = 0; hop < 4; hop++) {
+    // Waiting-room patience: keep polling the queue until admitted or the
+    // deadline passes, instead of bouncing 503s at the client. A position-1/1
+    // queue clears in seconds; the cap (WAITING_ROOM_MAX_WAIT_MS) is well
+    // under the request timeout so a genuinely stuck queue still fails fast.
+    const deadline = Date.now() + this.maxQueueWaitMs;
+    for (let hop = 0; hop < 64; hop++) {
       let s = this.sessions.get(token);
       const now = Date.now();
       if (s && s.status === 'active' && s.instanceId && now < s.expiresAt - this._expiryMarginMs) {
         return s.instanceId;
       }
       if (s && s.status === 'queued' && now < (s.retryAt || 0)) {
-        throw new WaitingRoomError(s.position, s.queueDepth, (s.retryAt || 0) - now);
+        // A poll for this token is already scheduled by a concurrent request —
+        // wait for its slot instead of throwing instantly (which turns every
+        // client retry into a hard 503 without ever waiting in the queue).
+        const wait = Math.min((s.retryAt || 0) - now, Math.max(1, deadline - now));
+        if (wait > 0) {
+          await sleep(wait + 50);
+          continue;
+        }
       }
 
       try {
@@ -107,6 +120,12 @@ export class SessionManager {
         if (s.status === 'queued') {
           const delay = clampDelay(state.estimatedWaitMs);
           const wakeAt = Date.now() + delay;
+          if (wakeAt > deadline) {
+            // Queue won't clear within our patience budget — surface it with a
+            // meaningful retry-after so the client backs off instead of
+            // hammering (and the runCompletion fallback can re-route).
+            throw new WaitingRoomError(s.position, s.queueDepth, Math.max(5_000, deadline - Date.now()));
+          }
           s.retryAt = wakeAt;
           this.log.info(
             `waiting room: position ${s.position}/${s.queueDepth}, poll in ${Math.round(delay / 1000)}s`,
@@ -133,9 +152,9 @@ export class SessionManager {
     }
     const final = this.sessions.get(token);
     if (final && final.status === 'queued') {
-      throw new WaitingRoomError(final.position ?? 1, final.queueDepth ?? 1, Math.max(2_000, (final.retryAt || 0) - Date.now()));
+      throw new WaitingRoomError(final.position ?? 1, final.queueDepth ?? 1, Math.max(5_000, (final.retryAt || 0) - Date.now()));
     }
-    throw new WaitingRoomError(final?.position ?? 1, final?.queueDepth ?? 1, 5_000);
+    throw new WaitingRoomError(final?.position ?? 1, final?.queueDepth ?? 1, 10_000);
   }
 
   async createOrRefresh(token, model = null) {

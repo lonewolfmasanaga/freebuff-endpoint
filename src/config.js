@@ -20,6 +20,10 @@ const defaults = {
   REQUEST_TIMEOUT_MS: 900_000,
   ROTATION_INTERVAL_MIN: 360,
   DEBOUNCE_MS: 1100,
+  // How long a request will wait in the free-tier waiting room (polling the
+  // queue) before giving up. Must stay well under REQUEST_TIMEOUT_MS so a
+  // genuinely stuck queue still fails fast instead of holding the socket.
+  WAITING_ROOM_MAX_WAIT_MS: 120_000,
   // Earned-pool reroute targets (read-only legacy keys; see openai.js fallback).
   // DeepSeek V4 Flash moved onto the premium pool upstream 2026-08-18; the
   // always-available unlimited standby is now MiMo 2.5.
@@ -53,6 +57,10 @@ if (process.env.API_KEYS) {
 }
 if (process.env.PROXY_URL !== undefined && process.env.PROXY_URL !== '') {
   env.PROXY_URL = process.env.PROXY_URL;
+}
+if (process.env.WAITING_ROOM_MAX_WAIT_MS !== undefined && process.env.WAITING_ROOM_MAX_WAIT_MS !== '') {
+  const v = Number(process.env.WAITING_ROOM_MAX_WAIT_MS);
+  if (Number.isFinite(v) && v > 0) env.WAITING_ROOM_MAX_WAIT_MS = v;
 }
 if (process.env.NO_PROXY_MODE === '1' || String(process.env.NO_PROXY_MODE).toLowerCase() === 'true') {
   env.PROXY_URL = '';
