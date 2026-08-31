@@ -30,7 +30,7 @@ if (!tokens.length) {
 }
 log.info(`${tokens.length} auth token(s) loaded`);
 
-const registry = new ModelRegistry(log);
+const registry = new ModelRegistry(log, { tier: config.CATALOG_TIER, refreshMs: config.CATALOG_REFRESH_MS });
 registry.start();
 
 const runs = new RunManager(log, config);
@@ -224,6 +224,12 @@ async function handleRequest(req, res) {
     });
   }
 
+  // Live catalog control: force the registry to re-read the CLI binary.
+  if (p === '/admin/refresh-catalog' && req.method === 'POST') {
+    const result = registry.refresh();
+    return sendJson(res, 200, { ok: true, source: result.source, models: result.models });
+  }
+
   // ---------- OpenAI surface ----------
   if (p === '/v1/models' && req.method === 'GET') {
     return sendJson(res, 200, {
@@ -321,7 +327,7 @@ function res_on_error(server) {
 server.listen(...parseListen(config.LISTEN_ADDR), () => {
   log.info(`freebuff-endpoint listening on ${config.LISTEN_ADDR}`);
   log.info(`upstream: ${config.UPSTREAM_BASE_URL} | egress: ${proxyDescription}`);
-  log.info(`models: ${registry.models().length} (static map)`);
+  log.info(`models: ${registry.models().length} (live catalog, tier ${registry.tier})`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {

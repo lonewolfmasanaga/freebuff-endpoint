@@ -1,50 +1,74 @@
-// Static model registry: a verified model -> agent map, no network sync.
-// Verified against upstream CodebuffAI/freebuff (common/src/constants/
-// free-agents.ts, freebuff-models.ts, freebuff-model-ids.ts), snapshot Aug 2026.
-// This mirrors FREEBUFF_ROOT_AGENT_ID_BY_MODEL for the current catalog. If
-// upstream adds or withdraws models, update this table.
+// Live model registry backed by the installed Freebuff/Codebuff CLI catalog.
 //
-// Notable since the last revision:
-//   - GLM 5.3 Flash replaced DeepSeek V4 Pro as the deep row (dropped here
-//     because app pickers no longer offer V4 Pro).
-//   - Solar Pro 4 was a new premium row; withdrawn upstream (absent from the
-//     0.0.156 CLI catalog) and removed from this map.
-//   - MiniMax moved to M3 (minimax/minimax-m3). V4 Flash & MiMo are unlimited.
-//   - 'google/gemini-2.5-flash-lite' never was a free-buff root (it pointed at
-//     the file-picker subagent) and was removed.
-//   - Ox Alpha was withdrawn upstream 2026-08-27 (not added).
-//   - Luna moved from base2-free-luna -> base3-free-luna (base2 retired
-//     upstream; free_mode_legacy_luna_agent). Kept:
-//       'openai/gpt-5.6-luna'     -> base3-free-luna   (DEFAULT Luna)
-//       'openai/gpt-5.6-luna-es'  -> base3-free-luna-es  (not yet mapped)
-//       'openai/gpt-5.6-luna-max' -> base3-free-luna-max (not yet mapped)
-//   - GLM 5.3 Flash and Solar Pro 4 are gone from the current (0.0.156) CLI
-//     catalog — both removed; only glm-5.2 remains in the z-ai family.
+// The former implementation was a hand-maintained static VERIFIED map — which
+// went stale the moment Freebuff retired an agent (base2-free-luna) or added
+// new tiers. This version derives the model -> agent map from the CLI binary
+// at load time and refreshes it periodically, so upgrades to the CLI are
+// picked up automatically and the gateway never advertises a model it can't
+// serve.
+//
+// Keeps the same public surface (start, stop, models, has, agentForModel,
+// status) so the protocol layers are untouched.
+import { loadCatalog, readCliCatalog, catalogSourceLabel } from './catalog.js';
+import { currentCliVersion } from './http-client.js';
 
-const MODELS = {
-  'deepseek/deepseek-v4-flash': 'base2-free-deepseek-flash',
-  'mimo/mimo-v2.5': 'base2-free-mimo',
-  'minimax/minimax-m3': 'base2-free-minimax-m3',
-  'openai/gpt-5.6-luna': 'base3-free-luna',
-  'z-ai/glm-5.2': 'base2-free-glm', // referral-gated premium tier, still live
-};
+const DEFAULT_REFRESH_MS = 6 * 3600 * 1000; // must equal catalog cache TTL default
 
 export class ModelRegistry {
-  constructor(logger) {
+  constructor(logger, options = {}) {
     this.log = logger;
-    this.modelToAgent = { ...MODELS };
+    this.tier = options.tier || 'base3';
+    this.refreshMs = options.refreshMs || DEFAULT_REFRESH_MS;
+    this.modelToAgent = {}; // model id -> agent
+    this.source = 'seed';
+    this.updatedAt = Date.now();
+    this._timer = null;
   }
 
-  start() {}
+  _load() {
+    const c = loadCatalog({ tier: this.tier });
+    this.modelToAgent = c.models || {};
+    this.source = c.source;
+    this.updatedAt = c.updatedAt;
+  }
 
-  stop() {}
+  start() {
+    this._load();
+    this.log.info(
+      `catalog: ${Object.keys(this.modelToAgent).length} model(s) from ${catalogSourceLabel({ source: this.source })} (tier ${this.tier})`,
+    );
+    // Re-check periodically so CLI upgrades propagate while the gateway runs.
+    this._timer = setInterval(() => {
+      try {
+        this._load();
+        this.log.info(
+          `catalog refresh: ${Object.keys(this.modelToAgent).length} model(s), source ${catalogSourceLabel({ source: this.source })}`,
+        );
+      } catch (e) {
+        this.log.warn(`catalog refresh failed: ${e.message}`);
+      }
+    }, this.refreshMs);
+    this._timer.unref?.();
+  }
+
+  stop() {
+    if (this._timer) clearInterval(this._timer);
+    this._timer = null;
+  }
+
+  /** Force a synchronous re-read (used by the admin refresh endpoint). */
+  refresh() {
+    this._load();
+    this.log.info(`catalog manually refreshed: ${Object.keys(this.modelToAgent).length} model(s)`);
+    return { source: this.source, models: this.models() };
+  }
 
   models() {
     return Object.keys(this.modelToAgent).sort();
   }
 
   has(model) {
-    return !!this.modelToAgent[model];
+    return Object.prototype.hasOwnProperty.call(this.modelToAgent, model);
   }
 
   agentForModel(model) {
@@ -54,7 +78,10 @@ export class ModelRegistry {
   status() {
     return {
       models: this.models(),
-      source: 'static',
+      source: this.source,
+      tier: this.tier,
+      updatedAt: this.updatedAt,
+      cli: currentCliVersion(),
     };
   }
 }

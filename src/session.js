@@ -178,8 +178,13 @@ export class SessionManager {
           throw new RegionBlockedError(parsed.status);
         }
         if (parsed.status === 'model_locked') {
-          this.invalidate(token, `model_locked (bound to ${parsed.currentModel})`);
-          return parsed; // caller's ensure() loop sees non-active status and recreates
+          // The upstream still has a session bound to another model (currentModel).
+          // Local invalidation alone isn't enough — the ensure() loop would just
+          // re-admit and hit model_locked again forever. End the server session so
+          // the next admission can bind the requested model. This is the admission
+          // counterpart of the completion path's model_locked recovery.
+          await this.end(token).catch(() => {});
+          return { status: 'none' }; // caller's ensure() loop recreates fresh
         }
         throw Object.assign(new Error(`admission refused: ${parsed.status}${parsed.message ? ` — ${parsed.message}` : ''}`), { status: res.status });
       }

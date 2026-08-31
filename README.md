@@ -62,6 +62,8 @@ Works with defaults. Env vars beat `config.json` beats built-in defaults:
 | `REQUEST_TIMEOUT_MS` | `900000` | Max request lifetime |
 | `ROTATION_INTERVAL_MIN` | `360` | Restart an agent-run after this many minutes |
 | `DEBOUNCE_MS` | `1100` | Min gap between upstream calls |
+| `CATALOG_TIER` | `base3` | Agent generation to serve: `base3` (current/unlimited-premium, via proxy) or `base2` (legacy) |
+| `CATALOG_REFRESH_MS` | `21600000` | How often the model catalog is re-read from the installed CLI (6h) |
 | `WAITING_ROOM_MAX_WAIT_MS` | `120000` | How long a request waits in the free-tier queue before timing out |
 | `POOL_FALLBACK_MODEL` | `mimo/mimo-v2.5` | When a premium model's pool is exhausted *or* the free tier queues it, re-route to this unlimited model |
 | `POOL_FALLBACK_ELIGIBLE` | `["mimo/mimo-v2.5", ...]` | Which models may be used as the fallback target |
@@ -73,7 +75,9 @@ Works with defaults. Env vars beat `config.json` beats built-in defaults:
 1. Admits a free session per token (waiting room handled transparently), declaring your model via `x-freebuff-model`
 2. Keeps one long-lived agent-run per model-agent, restarted when stale
 3. Wraps requests in CLI-conformant shape (canonical system marker + signature toolset — upstream enforces both for free mode) and strips conformance artifacts from responses
-4. Model catalog is a static verified map (`src/registry.js`) — update the table when upstream changes
+4. **Model catalog is live-derived from the installed Freebuff/Codebuff CLI** (`freebuff.exe` / `codebuff.exe`), read at boot and refreshed every `CATALOG_REFRESH_MS` — so the model list always matches the Freebuff release you have installed, and never goes stale when Freebuff retires or adds agents. `POST /admin/refresh-catalog` forces an immediate re-read; `GET /v1/models` and `/status` reflect the live map.
+
+> Freebuff exposes **no "list models" HTTP endpoint** — the authoritative catalog ships inside the CLI itself (minified agent registry). Reading it from the binary is the only reliable way to stay current.
 
 ## Error handling
 

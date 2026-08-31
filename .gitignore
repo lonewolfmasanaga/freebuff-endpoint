@@ -8,3 +8,6 @@ config.json
 *.log
 config.json*
 *.user-backup
+
+# Live catalog cache (regenerated from the installed CLI on boot)
+catalog.cache.json

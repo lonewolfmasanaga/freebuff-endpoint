@@ -20,6 +20,12 @@ const defaults = {
   REQUEST_TIMEOUT_MS: 900_000,
   ROTATION_INTERVAL_MIN: 360,
   DEBOUNCE_MS: 1100,
+  // Live catalog: model -> agent map is derived from the installed Freebuff
+  // CLI (never-static). CATALOG_TIER selects which agent generation to use:
+  // 'base3' = current/unlimited-premium (via PROXY_URL), 'base2' = legacy.
+  // CATALOG_REFRESH_MS = how often to re-read the CLI for new models.
+  CATALOG_TIER: 'base3',
+  CATALOG_REFRESH_MS: 6 * 3600 * 1000,
   // How long a request will wait in the free-tier waiting room (polling the
   // queue) before giving up. Must stay well under REQUEST_TIMEOUT_MS so a
   // genuinely stuck queue still fails fast instead of holding the socket.
