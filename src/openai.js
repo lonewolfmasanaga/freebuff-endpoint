@@ -164,12 +164,14 @@ export async function runCompletion({ registry, runs, log, model, payload, wantS
         try {
           code = JSON.parse(errText)?.error || '';
         } catch { /* not json */ }
-        if (code === 'model_locked' || code === 'session_model_mismatch') {
-          // Session bound to another model: end it upstream and re-admit fresh
-          // for the requested model (the CLI's own "switch models" path).
+        if (code === 'model_locked' || code === 'session_model_mismatch' || code === 'free_mode_legacy_luna_agent') {
+          // Session bound to another model OR admitted under a retired agent:
+          // end it upstream and re-admit fresh so the new session picks up the
+          // current model/agent binding (the CLI's own "switch models" path,
+          // and Freebuff's "start a new conversation" remedy for legacy agents).
           await runs.sessions.end(usedToken).catch(() => {});
           runs.invalidateRunById(usedToken, usedRunId);
-          log.info(`released model-locked session (${code}), re-admitting for ${model}`);
+          log.info(`released ${code} session, re-admitting for ${model}`);
         } else {
           runs.invalidateRunById(usedToken, usedRunId);
         }

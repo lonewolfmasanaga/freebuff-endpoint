@@ -6,7 +6,7 @@ import os from 'node:os';
 import { Agent, ProxyAgent, request as undiciRequest, interceptors, buildConnector } from 'undici';
 import { SocksClient } from 'socks';
 
-const CLI_VERSION = '0.0.154';
+const CLI_VERSION = '0.0.156';
 
 export function currentCliVersion() {
   return CLI_VERSION;

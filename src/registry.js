@@ -12,12 +12,17 @@
 //   - 'google/gemini-2.5-flash-lite' never was a free-buff root (it pointed at
 //     the file-picker subagent) and was removed.
 //   - Ox Alpha was withdrawn upstream 2026-08-27 (not added).
+//   - Luna moved from base2-free-luna -> base3-free-luna (base2 retired
+//     upstream; free_mode_legacy_luna_agent). Kept:
+//       'openai/gpt-5.6-luna'     -> base3-free-luna   (DEFAULT Luna)
+//       'openai/gpt-5.6-luna-es'  -> base3-free-luna-es  (not yet mapped)
+//       'openai/gpt-5.6-luna-max' -> base3-free-luna-max (not yet mapped)
 
 const MODELS = {
   'deepseek/deepseek-v4-flash': 'base2-free-deepseek-flash',
   'mimo/mimo-v2.5': 'base2-free-mimo',
   'minimax/minimax-m3': 'base2-free-minimax-m3',
-  'openai/gpt-5.6-luna': 'base2-free-luna',
+  'openai/gpt-5.6-luna': 'base3-free-luna',
   'upstage/solar-pro4': 'base2-free-solar-pro4',
   'z-ai/glm-5.2': 'base2-free-glm', // referral-gated premium tier, still live
   'z-ai/glm-5.3-flash': 'base2-free-glm-5-3-flash',
@@ -51,4 +56,4 @@ export class ModelRegistry {
       source: 'static',
     };
   }
-}
+}

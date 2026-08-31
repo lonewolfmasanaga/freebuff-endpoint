@@ -40,6 +40,14 @@ const BLOCKED_CODES = new Set([
 // completion core's 'run' bucket special-case), so these stay in 'run'.
 const MODEL_BINDING_CODES = new Set(['model_locked', 'session_model_mismatch']);
 
+// The session was admitted under an agent id that upstream has since retired
+// ("This conversation uses a retired Luna agent … start a new conversation").
+// Same remedy as a model-binding conflict: end the session + drop the run so
+// the next admission picks up the CURRENT agent binding, not the stale one.
+// Only the credential's DVR/catalog can retire an agent, so as long as the
+// mapped agent id is still served, a fresh session clears it.
+const LEGACY_AGENT_CODES = new Set(['free_mode_legacy_luna_agent']);
+
 export class Upstream {
   constructor(logger, debounceMs) {
     this.log = logger;
@@ -141,6 +149,7 @@ export class Upstream {
     if (statusCode === 403 && !code) return 'auth'; // bare 403 with no structured verdict
     if (statusCode === 403 && MODEL_BINDING_CODES.has(code)) return 'run';
     if (SESSION_INVALID_CODES.has(code)) return 'session';
+    if (LEGACY_AGENT_CODES.has(code)) return 'run';
     if (MODEL_BINDING_CODES.has(code)) return 'run';
     if (statusCode === 429) return 'rate';
     return 'other';
