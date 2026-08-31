@@ -20,12 +20,16 @@ const defaults = {
   REQUEST_TIMEOUT_MS: 900_000,
   ROTATION_INTERVAL_MIN: 360,
   DEBOUNCE_MS: 1100,
-  // Live catalog: model -> agent map is derived from the installed Freebuff
-  // CLI (never-static). CATALOG_TIER selects which agent generation to use:
-  // 'base3' = current/unlimited-premium (via PROXY_URL), 'base2' = legacy.
-  // CATALOG_REFRESH_MS = how often to re-read the CLI for new models.
+  // Live catalog: model -> agent map is derived at runtime — first from the
+  // installed Freebuff/Codebuff CLI binary, else fetched from the public
+  // CodebuffAI/freebuff GitHub repo (no CLI install needed for end users).
+  // CATALOG_TIER selects which agent generation to use: 'base3' =
+  // current/unlimited-premium (via PROXY_URL), 'base2' = legacy.
+  // CATALOG_REFRESH_MS = how often to re-read the catalog.
+  // CATALOG_REMOTE_URL = GitHub API base for the CLI-less source ('' disables).
   CATALOG_TIER: 'base3',
   CATALOG_REFRESH_MS: 6 * 3600 * 1000,
+  CATALOG_REMOTE_URL: 'https://api.github.com/repos/CodebuffAI/freebuff/contents/common/src/constants',
   // How long a request will wait in the free-tier waiting room (polling the
   // queue) before giving up. Must stay well under REQUEST_TIMEOUT_MS so a
   // genuinely stuck queue still fails fast instead of holding the socket.
@@ -67,6 +71,16 @@ if (process.env.PROXY_URL !== undefined && process.env.PROXY_URL !== '') {
 if (process.env.WAITING_ROOM_MAX_WAIT_MS !== undefined && process.env.WAITING_ROOM_MAX_WAIT_MS !== '') {
   const v = Number(process.env.WAITING_ROOM_MAX_WAIT_MS);
   if (Number.isFinite(v) && v > 0) env.WAITING_ROOM_MAX_WAIT_MS = v;
+}
+if (process.env.CATALOG_REFRESH_MS !== undefined && process.env.CATALOG_REFRESH_MS !== '') {
+  const v = Number(process.env.CATALOG_REFRESH_MS);
+  if (Number.isFinite(v) && v > 0) env.CATALOG_REFRESH_MS = v;
+}
+if (process.env.CATALOG_TIER !== undefined && process.env.CATALOG_TIER !== '') {
+  env.CATALOG_TIER = process.env.CATALOG_TIER;
+}
+if (process.env.CATALOG_REMOTE_URL !== undefined && process.env.CATALOG_REMOTE_URL !== '') {
+  env.CATALOG_REMOTE_URL = process.env.CATALOG_REMOTE_URL;
 }
 if (process.env.NO_PROXY_MODE === '1' || String(process.env.NO_PROXY_MODE).toLowerCase() === 'true') {
   env.PROXY_URL = '';

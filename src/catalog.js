@@ -1,27 +1,36 @@
-// Live model catalog: derives the model -> agent map from the installed
-// Freebuff/Codebuff CLI binary instead of a hand-maintained static table.
+// Live model catalog: derives the model -> agent map from Freebuff's own
+// sources instead of a hand-maintained static table. No CLI required.
 //
-// Freebuff does not expose a "list models" HTTP endpoint — the authoritative
-// catalog ships inside the CLI itself (minified JS baking model-id constants
-// and the agent tier maps). Upgrading the CLI updates the catalog, so reading
-// it at runtime means the gateway NEVER falls behind Freebuff's releases.
+// Freebuff does not expose a "list models" HTTP endpoint, but it does publish
+// the authoritative catalog in two places, both read at runtime:
 //
-// Tier selection: the CLI publishes two generations — base2 (legacy) and
-// base3 (current/unlimited-premium). Base2 is retired per-model over time
-// (e.g. base2-free-luna -> free_mode_legacy_luna_agent). Default to base3,
-// which is the premium tier reached through the configured PROXY_URL.
+//   1. The installed Freebuff/Codebuff CLI binary (freebuff.exe / codebuff.exe)
+//      — minified JS baking the model-id constants and the agent tier maps.
+//      Matches exactly what the server accepts for a released build.
+//
+//   2. The public GitHub repo CodebuffAI/freebuff — the TypeScript source the
+//      binary is compiled from (common/src/constants/free-agents.ts +
+//      freebuff-models.ts). Plain text, no CLI install needed; can even be
+//      AHEAD of an old binary (dev branch carries models a stale build lacks).
+//
+// This makes the gateway work for end users who only paste a token — the
+// catalog is fetched, not local-installed. Tier selection: the CLI publishes
+// two generations — base2 (legacy) and base3 (current/unlimited-premium).
+// Base2 is retired per-model over time (e.g. base2-free-luna ->
+// free_mode_legacy_luna_agent). Default to base3, which is the premium tier
+// reached through the configured PROXY_URL.
 //
 // The catalog is cached (default 6h TTL), written to a JSON next to the
-// gateway, and can be force-refreshed via an admin endpoint. If parsing
-// fails or no CLI is found, it falls back to a minimal seed map kept only
+// gateway, and can be force-refreshed via an admin endpoint. If both live
+// sources fail, it falls back to the cache, then a minimal seed map kept only
 // as an offline last resort.
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
+import https from 'node:https';
 import { manicodeDir, ROOT_DIR } from './config.js';
 import { currentCliVersion } from './http-client.js';
 
-// A few online standbys as an offline fallback if the CLI can't be read.
+// A few online standbys as an offline fallback if no live source is reachable.
 const SEED = {
   'deepseek/deepseek-v4-flash': 'base3-free-deepseek-flash',
   'mimo/mimo-v2.5': 'base3-free-mimo',
@@ -32,6 +41,7 @@ const SEED = {
 
 const defaultCachePath = () => path.join(ROOT_DIR, 'catalog.cache.json');
 const DEFAULT_TIER = 'base3'; // premium/unlimited tier (via proxy)
+const DEFAULT_REMOTE = 'https://api.github.com/repos/CodebuffAI/freebuff/contents/common/src/constants';
 
 function cliCandidates() {
   const dir = manicodeDir();
@@ -41,6 +51,10 @@ function cliCandidates() {
     path.join(dir, 'codebuff.exe'),
   ];
 }
+
+// ---------------------------------------------------------------------------
+// Source 1: installed CLI binary
+// ---------------------------------------------------------------------------
 
 /**
  * Parse the CLI binary bytes into { model -> agent } preferring `tier`.
@@ -117,6 +131,94 @@ export function readCliCatalog(tier = DEFAULT_TIER) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Source 2: public GitHub repo (CLI-less)
+// ---------------------------------------------------------------------------
+
+function fetchUrl(url, timeoutMs = 20_000) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      url,
+      {
+        headers: {
+          'User-Agent': 'freebuff-endpoint',
+          // Raw file contents (no base64 wrapper) — works without auth.
+          Accept: 'application/vnd.github.raw+json',
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error(`HTTP ${res.statusCode} from ${url}`));
+        }
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+  });
+}
+
+/** Extract `export const X = 'model/id'` (single- or multi-line) from TS. */
+function parseModelConstants(source) {
+  const out = new Map();
+  // Normalize multi-line assignments to one line: CONST =\n  'value'
+  const joined = source.replace(/\r?\n/g, ' ');
+  const re = /export\s+const\s+([A-Za-z0-9_$]+)\s*=\s*'([a-zA-Z0-9._/-]+)'/g;
+  let m;
+  while ((m = re.exec(joined)) !== null) {
+    out.set(m[1], m[2]);
+  }
+  return out;
+}
+
+/** Parse a `FREEBUFF_*_AGENT_ID_BY_MODEL` map: { [CONST]: 'base3-free-x', … } */
+function parseTierMap(source, constants, mapName) {
+  const start = source.indexOf(`export const ${mapName}`);
+  if (start === -1) return null;
+  const body = source.slice(start, start + 6000);
+  const re = /\[([A-Za-z0-9_$]+)\]\s*:\s*'(base[23]-free-[a-z0-9._-]+)'/g;
+  const out = {};
+  let m;
+  while ((m = re.exec(body)) !== null) {
+    const model = constants.get(m[1]);
+    if (model) out[model] = m[2];
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Fetch the catalog from the public repo (no CLI needed). `mapName` selects
+ * the tier: FREEBUFF_CLI_BASE3_AGENT_ID_BY_MODEL (base3, CLI picker) or
+ * FREEBUFF_ROOT_AGENT_ID_BY_MODEL (base2).
+ */
+export async function fetchRemoteCatalog({ tier = DEFAULT_TIER, base = DEFAULT_REMOTE, timeoutMs = 20_000 } = {}) {
+  const mapName = tier === 'base2' ? 'FREEBUFF_ROOT_AGENT_ID_BY_MODEL' : 'FREEBUFF_CLI_BASE3_AGENT_ID_BY_MODEL';
+  const [agents, models, modelIds] = await Promise.all([
+    fetchUrl(`${base}/free-agents.ts?ref=main`, timeoutMs),
+    fetchUrl(`${base}/freebuff-models.ts?ref=main`, timeoutMs),
+    fetchUrl(`${base}/freebuff-model-ids.ts?ref=main`, timeoutMs),
+  ]);
+  // Model-id constants are spread across freebuff-models.ts (literals +
+  // multi-line) and freebuff-model-ids.ts (deepseek/minimax); a couple resolve
+  // through imports (mimo) — covered by the explicit aliases below.
+  const constants = new Map([
+    ...parseModelConstants(models),
+    ...parseModelConstants(modelIds),
+    ['FREEBUFF_MIMO_V25_MODEL_ID', 'mimo/mimo-v2.5'],
+  ]);
+  const map = parseTierMap(agents, constants, mapName);
+  if (!map) throw new Error(`remote catalog: ${mapName} not found in fetched source`);
+  return { map, source: `remote:${mapName}` };
+}
+
+// ---------------------------------------------------------------------------
+// Cache + loader
+// ---------------------------------------------------------------------------
+
 function readCache(cachePath) {
   try {
     const raw = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
@@ -132,23 +234,33 @@ function writeCache(catalog, cachePath) {
 }
 
 /**
- * Live catalog loader. Priority — freshness first when the CLI exists:
- *   1. parse the installed CLI (the live source of truth; persisted to cache)
- *   2. on-disk cache (fresh OR stale) as an offline fallback
- *   3. bundled SEED (last resort)
+ * Live catalog loader. Priority — freshness first:
+ *   1. parse the installed CLI (the released build; matches the server)
+ *   2. fetch the public GitHub repo (CLI-less; can be ahead of an old binary)
+ *      — skipped when `remoteUrl` is '' (offline deployments)
+ *   3. on-disk cache (fresh OR stale) as an offline fallback
+ *   4. bundled SEED (last resort)
  * The cache is never preferred over a live read, so a restart can't pin a
- * stale catalog (a common failure with hand-rolled caches — e.g. a model
- * added in an earlier session lingering after Freebuff retires it).
+ * stale catalog.
  * Returns { updatedAt, source, models } where models is { id -> agent }.
  */
-export function loadCatalog({ tier = DEFAULT_TIER, cachePath = defaultCachePath(), ttlMs = 6 * 3600 * 1000 } = {}) {
+export async function loadCatalog({ tier = DEFAULT_TIER, cachePath = defaultCachePath(), remoteUrl = DEFAULT_REMOTE, timeoutMs = 20_000 } = {}) {
   const cli = readCliCatalog(tier);
   if (cli) {
     writeCache(cli.map, cachePath);
     return { updatedAt: Date.now(), source: cli.source, models: cli.map };
   }
 
-  // No CLI readable — fall back to the cache regardless of age, then seed.
+  if (remoteUrl) {
+    try {
+      const remote = await fetchRemoteCatalog({ tier, base: remoteUrl, timeoutMs });
+      writeCache(remote.map, cachePath);
+      return { updatedAt: Date.now(), source: remote.source, models: remote.map };
+    } catch (e) {
+      // Remote unreachable — fall through to cache/seed.
+    }
+  }
+
   const cached = readCache(cachePath);
   if (cached && cached.models) {
     return { updatedAt: cached.updatedAt, source: 'cache', models: cached.models };

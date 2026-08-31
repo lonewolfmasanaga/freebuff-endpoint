@@ -19,6 +19,7 @@ export class ModelRegistry {
     this.log = logger;
     this.tier = options.tier || 'base3';
     this.refreshMs = options.refreshMs || DEFAULT_REFRESH_MS;
+    this.remoteUrl = options.remoteUrl || ''; // '' = remote disabled
     this.modelToAgent = {}; // model id -> agent
     this.source = 'seed';
     this.updatedAt = Date.now();
@@ -32,21 +33,23 @@ export class ModelRegistry {
     this.updatedAt = c.updatedAt;
   }
 
-  start() {
-    this._load();
+  /** Async variant that prefers a fresh remote fetch when the CLI is absent. */
+  async _loadAsync() {
+    const c = await loadCatalog({ tier: this.tier, remoteUrl: this.remoteUrl });
+    this.modelToAgent = c.models || {};
+    this.source = c.source;
+    this.updatedAt = c.updatedAt;
+  }
+
+  async start() {
+    await this._loadAsync();
     this.log.info(
       `catalog: ${Object.keys(this.modelToAgent).length} model(s) from ${catalogSourceLabel({ source: this.source })} (tier ${this.tier})`,
     );
-    // Re-check periodically so CLI upgrades propagate while the gateway runs.
+    // Re-check periodically so CLI upgrades / repo changes propagate while the
+    // gateway runs.
     this._timer = setInterval(() => {
-      try {
-        this._load();
-        this.log.info(
-          `catalog refresh: ${Object.keys(this.modelToAgent).length} model(s), source ${catalogSourceLabel({ source: this.source })}`,
-        );
-      } catch (e) {
-        this.log.warn(`catalog refresh failed: ${e.message}`);
-      }
+      this._loadAsync().catch((e) => this.log.warn(`catalog refresh failed: ${e.message}`));
     }, this.refreshMs);
     this._timer.unref?.();
   }

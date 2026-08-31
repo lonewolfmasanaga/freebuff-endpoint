@@ -30,7 +30,7 @@ if (!tokens.length) {
 }
 log.info(`${tokens.length} auth token(s) loaded`);
 
-const registry = new ModelRegistry(log, { tier: config.CATALOG_TIER, refreshMs: config.CATALOG_REFRESH_MS });
+const registry = new ModelRegistry(log, { tier: config.CATALOG_TIER, refreshMs: config.CATALOG_REFRESH_MS, remoteUrl: config.CATALOG_REMOTE_URL });
 registry.start();
 
 const runs = new RunManager(log, config);
@@ -327,7 +327,7 @@ function res_on_error(server) {
 server.listen(...parseListen(config.LISTEN_ADDR), () => {
   log.info(`freebuff-endpoint listening on ${config.LISTEN_ADDR}`);
   log.info(`upstream: ${config.UPSTREAM_BASE_URL} | egress: ${proxyDescription}`);
-  log.info(`models: ${registry.models().length} (live catalog, tier ${registry.tier})`);
+  log.info(`models: ${registry.models().length} (live catalog, tier ${registry.tier}, loading in background)`);
 });
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
