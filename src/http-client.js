@@ -123,6 +123,11 @@ export function configureProxy(proxyUrl) {
     globalThis.__freebuffBaseURL = 'https://www.codebuff.com'; // documented default
   }
   const redirectInterceptor = interceptors.redirect({ maxRedirections: 5 }); // upstream issues 307s; Go's default client follows them
+  if (!dispatcher) {
+    // Guarantee a working egress even when PROXY_URL is invalid — undici
+    // throws on a null dispatcher and upstreamRequest depends on one.
+    setDispatcher(new Agent({ connect: { timeout: 15_000 } }).compose(redirectInterceptor), 'direct (no proxy)');
+  }
   if (!proxyUrl) {
     setDispatcher(new Agent({ connect: { timeout: 15_000 } }).compose(redirectInterceptor), 'direct (no proxy)');
     return { ok: true, mode: proxyDescription };
@@ -151,11 +156,12 @@ export function configureProxy(proxyUrl) {
  */
 export async function upstreamRequest({ method = 'POST', pathname, authToken, body, extraHeaders = {} }) {
   const base = globalThis.__freebuffBaseURL.replace(/\/+$/, '');
+  const fingerprint = fingerprintHeaderOrNull();
   const headers = {
     authorization: `Bearer ${authToken}`,
     accept: 'application/json, text/event-stream',
     'user-agent': generateUserAgent(),
-    ...(fingerprintHeaderOrNull() ? { 'x-codebuff-fingerprint': fingerprintHeaderOrNull() } : {}),
+    ...(fingerprint ? { 'x-codebuff-fingerprint': fingerprint } : {}),
     ...extraHeaders,
   };
   if (body !== undefined) headers['content-type'] = 'application/json';
@@ -164,7 +170,9 @@ export async function upstreamRequest({ method = 'POST', pathname, authToken, bo
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
-    dispatcher,
+    // Never pass null: undici throws "Cannot read properties of null" and the
+    // global dispatcher (no proxy) is a safer last resort than a crash.
+    dispatcher: dispatcher || undefined,
   });
 
   const h = {};

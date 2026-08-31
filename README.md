@@ -60,7 +60,12 @@ Works with defaults. Env vars beat `config.json` beats built-in defaults:
 | `API_KEYS` | `[]` | Require client keys if exposing beyond localhost |
 | `UPSTREAM_BASE_URL` | codebuff.com | Upstream API base |
 | `REQUEST_TIMEOUT_MS` | `900000` | Max request lifetime |
+| `ROTATION_INTERVAL_MIN` | `360` | Restart an agent-run after this many minutes |
 | `DEBOUNCE_MS` | `1100` | Min gap between upstream calls |
+| `POOL_FALLBACK_MODEL` | `mimo/mimo-v2.5` | When a premium model's pool is exhausted, re-route to this unlimited model |
+| `POOL_FALLBACK_ELIGIBLE` | `["mimo/mimo-v2.5", ...]` | Which models may be used as the fallback target |
+
+`config.example.json` is a safe template — copy it to `config.json` and fill in your own `AUTH_TOKENS` / `PROXY_URL`. Real tokens and proxy credentials never belong in a committed file (see `.gitignore`).
 
 ## How it works
 
@@ -68,6 +73,14 @@ Works with defaults. Env vars beat `config.json` beats built-in defaults:
 2. Keeps one long-lived agent-run per model-agent, restarted when stale
 3. Wraps requests in CLI-conformant shape (canonical system marker + signature toolset — upstream enforces both for free mode) and strips conformance artifacts from responses
 4. Model catalog is a static verified map (`src/registry.js`) — update the table when upstream changes
+
+## Error handling
+
+Every failure carries an explanation you can act on, on both protocol surfaces:
+
+- OpenAI errors include `code` (e.g. `insufficient_quota`, `rate_limit_exceeded`, `region_or_account_blocked`, `waiting_room_queued`) and a plain-English `hint` telling you what to do next.
+- Anthropic errors fold the same hint into `message` (most clients render only that) and keep structured `code` / `hint` fields for tools that inspect JSON.
+- Quota, rate-limit, and waiting-room responses set a `retry-after` header so clients can back off instead of hammering.
 
 ## Notes & honest risks
 

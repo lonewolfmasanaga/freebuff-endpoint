@@ -21,8 +21,10 @@ const defaults = {
   ROTATION_INTERVAL_MIN: 360,
   DEBOUNCE_MS: 1100,
   // Earned-pool reroute targets (read-only legacy keys; see openai.js fallback).
-  POOL_FALLBACK_MODEL: 'deepseek/deepseek-v4-flash',
-  POOL_FALLBACK_ELIGIBLE: ['deepseek/deepseek-v4-flash', 'minimax/minimax-m2.7', 'mimo/mimo-v2.5'],
+  // DeepSeek V4 Flash moved onto the premium pool upstream 2026-08-18; the
+  // always-available unlimited standby is now MiMo 2.5.
+  POOL_FALLBACK_MODEL: 'mimo/mimo-v2.5',
+  POOL_FALLBACK_ELIGIBLE: ['mimo/mimo-v2.5', 'deepseek/deepseek-v4-flash'],
 };
 
 function loadFile() {

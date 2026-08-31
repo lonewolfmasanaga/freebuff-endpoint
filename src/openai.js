@@ -2,7 +2,7 @@
 // Also hosts the shared completion core used by the Anthropic surface.
 import { readJson } from './http-client.js';
 import { scrubSentinelFromCompletion, scrubSentinelSseStream } from './impersonate.js';
-import { SessionRateLimitedError } from './errors.js';
+import { SessionRateLimitedError, RegionBlockedError, describeError } from './errors.js';
 import { config } from './config.js';
 
 /** Map provider-specific completion fields onto standard OpenAI ones. */
@@ -92,7 +92,14 @@ export async function runCompletion({ registry, runs, log, model, payload, wantS
 
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (signal?.aborted) throw new Error('client aborted');
+    if (signal?.aborted) {
+      // Marker for the HTTP layer: client disconnect or the request-timeout cap.
+      // The timeout reason ('request timeout') is preserved so a still-connected
+      // client gets a 504 instead of a silent socket drop.
+      const e = new Error(signal.reason?.message || 'client aborted');
+      e.name = 'AbortError';
+      throw e;
+    }
     let lease = null;
     try {
       lease = await runs.acquire(agentId, model);
@@ -202,13 +209,31 @@ export async function runCompletion({ registry, runs, log, model, payload, wantS
         body: openaiError(errText.slice(0, 500) || 'upstream error', 'upstream_error'),
       };
     } catch (e) {
-      if (e?.name === 'AbortError' || signal?.aborted) throw e; // client gone: never burn a retry
+      if (signal?.aborted) {
+        // Client gone or the timeout cap fired — never burn a retry. Normalize
+        // whatever undici rejected with (it propagates the bare abort reason,
+        // name 'Error') into the AbortError marker the HTTP layer recognizes,
+        // preserving the 'request timeout' reason so connected clients get a 504.
+        const wrapped = new Error(signal.reason?.message || e?.message || 'client aborted');
+        wrapped.name = 'AbortError';
+        throw wrapped;
+      }
+      if (e?.name === 'AbortError') throw e;
       if (e.name === 'WaitingRoomError') {
         return {
           kind: 'json',
           status: 503,
           body: openaiError(e.message, 'waiting_room_queued'),
           retryAfterMs: e.retryAfterMs,
+        };
+      }
+      if (e instanceof RegionBlockedError) {
+        // Terminal account/region verdict from the admission path — no retries,
+        // same clear error the /chat/completions blocked bucket produces.
+        return {
+          kind: 'json',
+          status: 403,
+          body: openaiError(`model "${model}" unavailable for this account/region (${e.status})`, 'region_or_account_blocked'),
         };
       }
       if (e instanceof SessionRateLimitedError) {
@@ -441,5 +466,15 @@ async function readAll(stream, limit = 2_000_000) {
 }
 
 export function openaiError(message, code) {
-  return { error: { message, type: 'freebuff_endpoint_error', code: code || null } };
+  // Attach the code and a plain-English hint automatically so a client or a
+  // human reading the JSON always knows what happened and what to do next.
+  const { code: finalCode, hint } = describeError(code, message);
+  return {
+    error: {
+      message,
+      type: 'freebuff_endpoint_error',
+      code: finalCode,
+      ...(hint ? { hint } : {}),
+    },
+  };
 }

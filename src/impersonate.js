@@ -213,9 +213,15 @@ export function scrubSentinelSseStream(byteStream) {
           entry.name += fragName;
           if (tc.id) entry.id = tc.id;
 
-          // Classification: as soon as the accumulated name cannot be a
-          // prefix of 'end_turn', this call is visibly NOT the sentinel.
-          if (entry.name && !isEndTurnPrefix(entry.name)) {
+          // Classification: a sentinel-prefixed id is authoritative even when
+          // the name hasn't arrived yet (mirrors isSentinelCall's id check);
+          // otherwise, as soon as the accumulated name cannot be a prefix of
+          // 'end_turn', this call is visibly NOT the sentinel.
+          if (entry.id.startsWith(SENTINEL_ID_PREFIX)) {
+            entry.chunks.push(tc);
+            entry.isSentinel = true;
+            classified.set(entry.slot, 'sentinel');
+          } else if (entry.name && !isEndTurnPrefix(entry.name)) {
             entry.chunks.push(tc);
             classified.set(entry.slot, 'visible');
             outs.push(...flushPending(entry, false));

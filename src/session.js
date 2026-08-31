@@ -2,7 +2,22 @@
 // Mirrors upstream semantics: POST /api/v1/freebuff/session (create/refresh),
 // GET with x-freebuff-instance-id (poll while queued), DELETE (end).
 import { upstreamRequest, readJson } from './http-client.js';
-import { WaitingRoomError, SessionRateLimitedError } from './errors.js';
+import { WaitingRoomError, SessionRateLimitedError, RegionBlockedError } from './errors.js';
+
+// Admission verdicts that mean the account/region itself is not allowed to use
+// this tier — terminal and not quota-related, so they surface as the clear
+// 'region_or_account_blocked' error instead of a generic upstream failure.
+const REGION_BLOCKED_STATUSES = new Set([
+  'country_blocked',
+  'country_restricted',
+  'region_blocked',
+  'region_restricted',
+  'banned',
+  'suspended',
+  'full_access_required',
+  'limited_only',
+  'not_available_in_region',
+]);
 
 export class SessionManager {
   constructor(logger, { debounceMs = 0 } = {}) {
@@ -110,6 +125,7 @@ export class SessionManager {
       } catch (e) {
         if (e instanceof WaitingRoomError) throw e;
         if (e instanceof SessionRateLimitedError) throw e; // terminal verdict — propagate as-is
+        if (e instanceof RegionBlockedError) throw e; // terminal verdict — propagate as-is
         const err = new Error(`session refresh failed: ${e.message}`);
         err.upstream = true;
         throw err;
@@ -138,6 +154,9 @@ export class SessionManager {
       if (parsed && parsed.status && parsed.status !== 'active') {
         if (['rate_limited', 'spend_limited', 'ip_capped'].includes(parsed.status)) {
           throw new SessionRateLimitedError(parsed);
+        }
+        if (REGION_BLOCKED_STATUSES.has(parsed.status)) {
+          throw new RegionBlockedError(parsed.status);
         }
         if (parsed.status === 'model_locked') {
           this.invalidate(token, `model_locked (bound to ${parsed.currentModel})`);

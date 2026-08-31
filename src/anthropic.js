@@ -119,8 +119,16 @@ export async function handleMessages({ registry, runs, log, body, wantStream, si
   });
 
   if (result.kind !== 'json' || result.status !== 200) {
-    const msg = result.body?.error?.message || 'upstream error';
-    return { status: result.status >= 400 ? result.status : 502, body: anthropicError(msg, result.status) };
+    // Thread the rich OpenAI error (code + hint) onto the Anthropic surface so
+    // the user sees exactly what went wrong and what to do, not just a status.
+    const oerr = result.body?.error || {};
+    const msg = oerr.message || 'upstream error';
+    return {
+      status: result.status >= 400 ? result.status : 502,
+      body: anthropicError(msg, result.status, oerr.code, oerr.hint),
+      // Keep the backoff hint for the HTTP layer (retry-after header).
+      ...(result.retryAfterMs ? { retryAfterMs: result.retryAfterMs } : {}),
+    };
   }
 
   const completion = result.body;
@@ -248,10 +256,19 @@ function splitForStream(text) {
   return parts;
 }
 
-export function anthropicError(message, statusCode) {
+export function anthropicError(message, statusCode, code = null, hint = '') {
   const type =
     statusCode === 401 ? 'authentication_error' : statusCode === 429 ? 'rate_limit_error' : statusCode >= 500 ? 'api_error' : 'invalid_request_error';
-  return { type: 'error', error: { type, message } };
+  const err = {
+    type,
+    // Many Anthropic clients render only `message`, so fold the actionable hint
+    // into it; the structured code/hint are also kept for clients that inspect
+    // the JSON directly.
+    message: hint ? `${message} — ${hint}` : message,
+  };
+  if (code) err.code = code;
+  if (hint) err.hint = hint;
+  return { type: 'error', error: err };
 }
 
 export function estimateTokens(body) {

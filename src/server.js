@@ -63,6 +63,10 @@ function readBody(req) {
     });
     req.on('end', () => done(resolve, Buffer.concat(chunks).toString('utf8')));
     req.on('error', (e) => done(reject, e));
+    // A client that vanishes mid-body fires neither 'end' nor 'error' — without
+    // this, the async handler would hang forever on a half-sent request.
+    // 'close' also fires after 'end' on normal completion; `done` makes that a no-op.
+    req.on('close', () => done(reject, new Error('client disconnected')));
   });
 }
 
@@ -131,12 +135,17 @@ async function pumpSse(res, stream, extraHeaders = {}) {
   }
 }
 
-/** Abort when the client disconnects; also enforces a max request lifetime. */
-function requestSignal(req, timeoutMs = config.REQUEST_TIMEOUT_MS) {
+/**
+ * Abort when the client disconnects; also enforces a max request lifetime.
+ * Must listen on the RESPONSE: the request's own 'close' fires at message
+ * completion (same tick as 'end') — long before the upstream round-trip
+ * finishes — so it can never detect a mid-request disconnect.
+ */
+function requestSignal(req, res, timeoutMs = config.REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
-  req.on('close', () => controller.abort());
+  res.on('close', () => controller.abort());
   const cap = Math.min(Number(timeoutMs) || config.REQUEST_TIMEOUT_MS, config.REQUEST_TIMEOUT_MS + 30_000);
-  const t = setTimeout(() => controller.abort(), cap);
+  const t = setTimeout(() => controller.abort(new Error('request timeout')), cap);
   t.unref?.();
   controller.signal.addEventListener('abort', () => clearTimeout(t), { once: true });
   return controller.signal;
@@ -146,6 +155,14 @@ function requestSignal(req, timeoutMs = config.REQUEST_TIMEOUT_MS) {
 const server = http.createServer((req, res) => {
   // Handler is async but never allowed to reject: every path is guarded.
   handleRequest(req, res).catch((e) => {
+    if (e?.name === 'AbortError') {
+      // Client disconnected or the hard timeout fired. On timeout with nothing
+      // written yet, say so explicitly; otherwise just drop the socket.
+      if (e?.message === 'request timeout' && !res.headersSent && !res.destroyed) {
+        return sendJson(res, 504, openaiError('upstream request timed out', 'upstream_error'));
+      }
+      return void res.destroy();
+    }
     log.error(`request ${req.method} ${req.url} crashed: ${e.stack || e.message}`);
     if (!res.headersSent && !res.destroyed) {
       sendJson(res, 500, openaiError('internal error', 'internal'));
@@ -222,7 +239,7 @@ async function handleRequest(req, res) {
 
     const model = typeof body.model === 'string' ? body.model : registry.models()[0];
     const wantStream = !!body.stream;
-    const signal = requestSignal(req);
+    const signal = requestSignal(req, res);
 
     // Pool-aware reroute: earned-pool models transparently fall back to an
     // unlimited model instead of surfacing a 429 ('' disables).
@@ -248,10 +265,13 @@ async function handleRequest(req, res) {
     if (!body) return;
 
     const wantStream = !!body.stream;
-    const signal = requestSignal(req);
+    const signal = requestSignal(req, res);
     const result = await handleMessages({ registry, runs, log, body, wantStream, signal });
     if (result.stream) return pumpSse(res, result.stream);
-    return sendJson(res, result.status, result.body);
+    // Keep the backoff hint on this surface too — Hermes uses it to pace retries.
+    const headers = {};
+    if (result.retryAfterMs) headers['retry-after'] = String(Math.ceil(result.retryAfterMs / 1000));
+    return sendJson(res, result.status, result.body, headers);
   }
 
   if (p === '/v1/messages/count_tokens' && req.method === 'POST') {

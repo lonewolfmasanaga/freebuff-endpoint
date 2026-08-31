@@ -112,7 +112,17 @@ export class Upstream {
     metadata.client_id = this._clientIdFor(authToken, runId); // stable within a run
     if (instanceId) metadata.freebuff_instance_id = instanceId;
     body.codebuff_metadata = metadata;
-    delete body.stream; // upstream always streams; we reassemble or forward as needed
+    // Upstream always streams internally, but it validates that `stream_options`
+    // (e.g. Hermes' { include_usage: true }) only ever accompanies stream=true —
+    // sending it without stream trips a 400. In streaming mode we forward the
+    // raw SSE, so preserve stream=true (usage flows through). In blocking mode
+    // we reassemble upstream ourselves, so both belong to no one: strip them.
+    if (body.stream) {
+      body.stream = true;
+    } else {
+      delete body.stream;
+      delete body.stream_options;
+    }
 
     return upstreamRequest({ pathname: '/api/v1/chat/completions', authToken, body });
   }
