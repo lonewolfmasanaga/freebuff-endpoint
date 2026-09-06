@@ -1,4 +1,4 @@
-// Freebuff Endpoint — production container image.
+# Freebuff Endpoint — production container image.
 FROM node:22-alpine
 
 WORKDIR /app
