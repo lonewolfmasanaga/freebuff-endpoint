@@ -2,8 +2,11 @@
 // agent, restarted when stale. No pooling, no rotation, no cooldowns.
 // Keeps the lease shape openai.js expects (lease.pool.token) so the
 // protocol layer stays untouched.
+import fs from 'node:fs';
+import path from 'node:path';
 import { Upstream } from './upstream.js';
 import { SessionManager } from './session.js';
+import { ROOT_DIR } from './config.js';
 
 function short(t) {
   return t ? `${t.slice(0, 6)}…` : '(none)';
@@ -19,6 +22,11 @@ export class RunManager {
     this.runs = new Map(); // agentId -> { id, startedAt, inflight, requests }
     this.shuttingDown = false;
     this.lastError = null;
+    // Idle-refund reaper: an open session is billed for its full hour
+    // whether used or not; end it early after IDLE_END_MIN of silence.
+    this.idleTimer = null;
+    this.lastActivity = Date.now();
+    this.idleEndMin = Number(config.IDLE_END_MIN) > 0 ? Number(config.IDLE_END_MIN) : 0;
   }
 
   setTokens(tokens) {
@@ -44,6 +52,8 @@ export class RunManager {
     }
     run.inflight++;
     run.requests++;
+    this._clearIdleTimer();
+    this.lastActivity = Date.now();
     // `pool` shim keeps openai.js's lease.pool.token access working.
     return { pool: { token: this.token }, run, instanceId, agentId };
   }
@@ -63,6 +73,47 @@ export class RunManager {
   release(lease) {
     if (!lease) return;
     lease.run.inflight = Math.max(0, lease.run.inflight - 1);
+    this.lastActivity = Date.now();
+    this._armIdleTimer();
+  }
+
+  _clearIdleTimer() {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+  }
+
+  _anyInflight() {
+    for (const r of this.runs.values()) if (r.inflight > 0) return true;
+    return false;
+  }
+
+  /** Arm the refund reaper; no-op when disabled (IDLE_END_MIN <= 0). */
+  _armIdleTimer() {
+    if (this.idleEndMin <= 0 || this.shuttingDown) return;
+    this._clearIdleTimer();
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      this._endIdleSession().catch(() => {});
+    }, this.idleEndMin * 60_000);
+    if (typeof this.idleTimer.unref === 'function') this.idleTimer.unref();
+  }
+
+  /**
+   * End an idle session so upstream refunds the unused remainder of the
+   * session-hour (DELETE /api/v1/freebuff/session). Cached runs belonged to the
+   * ended session, so drop them; the next request admits a fresh session.
+   */
+  async _endIdleSession() {
+    if (this.shuttingDown || !this.token) return;
+    if (this._anyInflight()) { this._armIdleTimer(); return; }
+    const idleMin = Math.round((Date.now() - this.lastActivity) / 60_000);
+    await this.sessions.end(this.token).catch(() => {});
+    this.runs.clear();
+    const line = new Date().toISOString() + ' idle ' + idleMin + 'min - session ended early (refund requested) token=' + short(this.token);
+    this.log.info(line);
+    try { fs.appendFileSync(path.join(ROOT_DIR, 'idle-refunds.jsonl'), line + String.fromCharCode(10)); } catch { /* best effort */ }
   }
 
   invalidateRun(lease) {
@@ -113,6 +164,7 @@ export class RunManager {
 
   async shutdown() {
     this.shuttingDown = true;
+    this._clearIdleTimer();
     // Quiesce: let in-flight requests drain (bounded) before FINISHing runs.
     const deadline = Date.now() + 10_000;
     for (;;) {

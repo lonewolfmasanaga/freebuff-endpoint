@@ -19,6 +19,7 @@ const defaults = {
   PROXY_URL: '',
   REQUEST_TIMEOUT_MS: 900_000,
   ROTATION_INTERVAL_MIN: 360,
+  IDLE_END_MIN: 10,
   DEBOUNCE_MS: 1100,
   // Live catalog: model -> agent map is derived at runtime — first from the
   // installed Freebuff/Codebuff CLI binary, else fetched from the public

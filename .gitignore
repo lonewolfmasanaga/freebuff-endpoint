@@ -11,3 +11,4 @@ config.json*
 
 # Live catalog cache (regenerated from the installed CLI on boot)
 catalog.cache.json
+idle-refunds.jsonl
