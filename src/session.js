@@ -218,11 +218,28 @@ export class SessionManager {
     return readJson(res.stream);
   }
 
+  /**
+   * End the upstream session for this token. The DELETE must name the exact
+   * instance via x-freebuff-instance-id: without it upstream silently
+   * ignores the request while a session is live or queued, so the
+   * session-hour keeps billing and no refund is ever issued.
+   * Returns { http, body } describing upstream's verdict, or null on failure.
+   */
   async end(token) {
+    const s = this.sessions.get(token);
+    const extraHeaders = s && s.instanceId ? { 'x-freebuff-instance-id': s.instanceId } : {};
+    let result = null;
     try {
-      await upstreamRequest({ method: 'DELETE', pathname: '/api/v1/freebuff/session', authToken: token });
-    } catch { /* best effort */ }
+      const res = await upstreamRequest({ method: 'DELETE', pathname: '/api/v1/freebuff/session', authToken: token, extraHeaders });
+      result = {
+        http: res.status,
+        body: res.status < 400
+          ? await readJson(res.stream).catch(() => null)
+          : (await safeBody(res.stream)).slice(0, 120) || null,
+      };
+    } catch { /* best effort — local state is dropped regardless */ }
     this.sessions.delete(token);
+    return result;
   }
 }
 

@@ -104,14 +104,18 @@ export class RunManager {
    * End an idle session so upstream refunds the unused remainder of the
    * session-hour (DELETE /api/v1/freebuff/session). Cached runs belonged to the
    * ended session, so drop them; the next request admits a fresh session.
+   * Upstream's refund verdict is recorded in the log + idle-refunds.jsonl.
    */
   async _endIdleSession() {
     if (this.shuttingDown || !this.token) return;
     if (this._anyInflight()) { this._armIdleTimer(); return; }
     const idleMin = Math.round((Date.now() - this.lastActivity) / 60_000);
-    await this.sessions.end(this.token).catch(() => {});
+    // end() targets the live instance via x-freebuff-instance-id and returns
+    // upstream's actual verdict — record it instead of assuming a refund.
+    const r = await this.sessions.end(this.token).catch(() => null);
     this.runs.clear();
-    const line = new Date().toISOString() + ' idle ' + idleMin + 'min - session ended early (refund requested) token=' + short(this.token);
+    const refund = !r ? 'error' : r.body ? JSON.stringify(r.body).slice(0, 120) : 'http ' + r.http + ' no-body';
+    const line = new Date().toISOString() + ' idle ' + idleMin + 'min - session ended early token=' + short(this.token) + ' refund=' + refund;
     this.log.info(line);
     try { fs.appendFileSync(path.join(ROOT_DIR, 'idle-refunds.jsonl'), line + String.fromCharCode(10)); } catch { /* best effort */ }
   }
@@ -177,7 +181,8 @@ export class RunManager {
     }
     this.runs.clear();
     if (this.token) {
-      await this.sessions.end(this.token).catch(() => {});
+      const r = await this.sessions.end(this.token).catch(() => null);
+      if (r && r.body) this.log.info('shutdown: session ended refund=' + JSON.stringify(r.body).slice(0, 120));
     }
   }
 }
