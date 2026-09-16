@@ -9,6 +9,8 @@ git clone https://github.com/lonewolfmasanaga/freebuff-endpoint.git
 cd freebuff-endpoint
 npm install
 AUTH_TOKENS=your-freebuff-token npm start
+cd src
+node server.js
 ```
 
 Requires **Node.js ≥ 20.11** ([nodejs.org](https://nodejs.org)). Only two dependencies (`undici`, `socks`).
