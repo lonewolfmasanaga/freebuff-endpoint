@@ -106,7 +106,7 @@ function safeStringify(v) {
   }
 }
 
-export async function handleMessages({ registry, runs, log, body, wantStream, signal }) {
+export async function handleMessages({ registry, runs, log, body, wantStream, signal, fallback }) {
   const { payload } = convertAnthropicToOpenAI(body);
   const result = await runCompletion({
     registry,
@@ -116,6 +116,7 @@ export async function handleMessages({ registry, runs, log, body, wantStream, si
     payload,
     wantStream: false, // always consume fully; re-serialize in Anthropic shape
     signal,
+    fallback,
   });
 
   if (result.kind !== 'json' || result.status !== 200) {
@@ -128,6 +129,7 @@ export async function handleMessages({ registry, runs, log, body, wantStream, si
       body: anthropicError(msg, result.status, oerr.code, oerr.hint),
       // Keep the backoff hint for the HTTP layer (retry-after header).
       ...(result.retryAfterMs ? { retryAfterMs: result.retryAfterMs } : {}),
+      ...(result.headers ? { headers: result.headers } : {}),
     };
   }
 
@@ -135,6 +137,10 @@ export async function handleMessages({ registry, runs, log, body, wantStream, si
   const choice = completion.choices?.[0] || { message: {}, finish_reason: 'stop' };
   const blocks = [];
   const tc = choice.message.tool_calls || [];
+  // Pool-fallback reroutes report the actually-served model (OpenAI surface
+  // carries the same note) so Anthropic clients can see the substitution too.
+  const servedBy = completion.freebuff_served_by || null;
+  const extraHeaders = result.headers || {};
 
   if (choice.message.reasoning_content) {
     // Empty signatures fail strict client validation — omit unless real.
@@ -194,8 +200,9 @@ export async function handleMessages({ registry, runs, log, body, wantStream, si
       output_tokens: completion.usage?.completion_tokens ?? 0,
     },
   };
+  if (servedBy) resp.freebuff_served_by = servedBy;
 
-  if (!wantStream) return { status: 200, body: resp };
+  if (!wantStream) return { status: 200, body: resp, ...(Object.keys(extraHeaders).length ? { headers: extraHeaders } : {}) };
 
   // Re-serialize as an Anthropic SSE stream. Block indices are assigned
   // sequentially with a running counter over the SAME block list as the
@@ -243,7 +250,7 @@ export async function handleMessages({ registry, runs, log, body, wantStream, si
       controller.close();
     },
   });
-  return { status: 200, stream };
+  return { status: 200, stream, ...(Object.keys(extraHeaders).length ? { headers: extraHeaders } : {}) };
 }
 
 /** Split long text into a few progressive stream pieces (~240 chars each). */

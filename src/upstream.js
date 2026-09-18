@@ -48,6 +48,14 @@ const MODEL_BINDING_CODES = new Set(['model_locked', 'session_model_mismatch']);
 // mapped agent id is still served, a fresh session clears it.
 const LEGACY_AGENT_CODES = new Set(['free_mode_legacy_luna_agent']);
 
+// Upstream's model router answers 404 "No endpoints found for <model>" while a
+// model's provider pool is temporarily drained. It is transient — the same
+// model serves fine moments later — but it arrives on HTTP 404 with no
+// structured code, so it used to land in the terminal 'other' bucket and hard-
+// fail the request. Detect it by message so the completion core can retry and
+// then reroute to the pool-fallback model instead of surfacing the blip.
+const NO_ENDPOINTS_RE = /no endpoints found/i;
+
 export class Upstream {
   constructor(logger, debounceMs) {
     this.log = logger;
@@ -136,15 +144,11 @@ export class Upstream {
   }
 
   classify(statusCode, errorBodyText) {
-    let code = '';
-    let message = '';
-    try {
-      const parsed = JSON.parse(errorBodyText);
-      code = parsed?.error || parsed?.status || '';
-      message = parsed?.message || '';
-    } catch { /* not json */ }
+    const { code, message } = parseUpstreamError(errorBodyText);
     if (CONFORMANCE_CODES.has(code) || /freebuff CLI/i.test(message)) return 'conformance';
     if (BLOCKED_CODES.has(code)) return 'blocked'; // quota/region verdict — no auth cooldown
+    // Transient router 404s: retryable, and reroutable via the pool fallback.
+    if (statusCode === 404 && NO_ENDPOINTS_RE.test(message)) return 'no_endpoints';
     if (statusCode === 401) return 'auth';
     if (statusCode === 403 && !code) return 'auth'; // bare 403 with no structured verdict
     if (statusCode === 403 && MODEL_BINDING_CODES.has(code)) return 'run';
@@ -158,6 +162,38 @@ export class Upstream {
   statusLine() {
     return `debounce=${this.debounceMs}ms`;
   }
+}
+
+/**
+ * Parse an upstream error body into { code, message }. Upstream is not
+ * consistent about its shape: some routes send the flat form
+ *   { "error": "code", "message": "text", "status": 404, ... }
+ * while the OpenAI-proxy surface nests a full error object:
+ *   { "error": { "message": "No endpoints found for X.", "code": 404, ... } }
+ * The old flat-only reader missed the nested form, so a 404 with a string
+ * error field was misread as a "code" and message matching never saw
+ * "No endpoints found" — send it through both shapes.
+ */
+export function parseUpstreamError(errorBodyText) {
+  let code = '';
+  let message = '';
+  try {
+    const parsed = JSON.parse(errorBodyText);
+    if (parsed && typeof parsed === 'object') {
+      if (typeof parsed.error === 'string') code = parsed.error;
+      else if (parsed.error && typeof parsed.error === 'object') {
+        if (typeof parsed.error.message === 'string') message = parsed.error.message;
+        if (typeof parsed.error.code === 'string') code = parsed.error.code;
+      }
+      if (!message && typeof parsed.message === 'string') message = parsed.message;
+      if (!code && typeof parsed.status === 'string') code = parsed.status;
+    }
+  } catch {
+    // Not JSON: fall back to a substring scan so classifier rules can still
+    // act on plain-text bodies.
+    message = String(errorBodyText || '').slice(0, 500);
+  }
+  return { code, message };
 }
 
 function httpError(message, status, code) {

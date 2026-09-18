@@ -54,6 +54,8 @@ const HINTS = {
     'Run GET /v1/models for this gateway\'s list and pick a valid model id.',
   waiting_room_queued:
     'Freebuff\'s free tier stayed busy after waiting — retry in a few seconds, or switch to an unlimited model (mimo/mimo-v2.5, deepseek/deepseek-v4-flash) to skip the queue.',
+  no_endpoints:
+    'Upstream\'s model router temporarily has no provider endpoint for this model (transient — it usually returns within minutes). Retry shortly, pick another model, or let the gateway\'s pool fallback reroute automatically.',
   insufficient_quota:
     'Your pool for this model is exhausted for now — switch to an unlimited model (mimo/mimo-v2.5, deepseek/deepseek-v4-flash), or come back after the pool resets.',
   rate_limit_exceeded:

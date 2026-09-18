@@ -272,10 +272,18 @@ async function handleRequest(req, res) {
 
     const wantStream = !!body.stream;
     const signal = requestSignal(req, res);
-    const result = await handleMessages({ registry, runs, log, body, wantStream, signal });
-    if (result.stream) return pumpSse(res, result.stream);
+    // Same pool-aware reroute as the OpenAI surface: earned-pool models
+    // transparently fall back to an unlimited model instead of surfacing a
+    // 429 / waiting-room / no-endpoint failure ('' disables).
+    const model = typeof body.model === 'string' ? body.model : registry.models()[0];
+    let fallback = null;
+    const fb = (config.POOL_FALLBACK_MODEL || '').trim();
+    if (fb && fb !== model && registry.has(fb)) fallback = { preferredModel: fb, used: false };
+
+    const result = await handleMessages({ registry, runs, log, body, wantStream, signal, fallback });
+    if (result.stream) return pumpSse(res, result.stream, result.headers || {});
     // Keep the backoff hint on this surface too — Hermes uses it to pace retries.
-    const headers = {};
+    const headers = { ...(result.headers || {}) };
     if (result.retryAfterMs) headers['retry-after'] = String(Math.ceil(result.retryAfterMs / 1000));
     return sendJson(res, result.status, result.body, headers);
   }

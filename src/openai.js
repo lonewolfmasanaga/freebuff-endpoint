@@ -3,6 +3,7 @@
 import { readJson } from './http-client.js';
 import { scrubSentinelFromCompletion, scrubSentinelSseStream } from './impersonate.js';
 import { SessionRateLimitedError, RegionBlockedError, describeError } from './errors.js';
+import { parseUpstreamError } from './upstream.js';
 import { config } from './config.js';
 
 /** Map provider-specific completion fields onto standard OpenAI ones. */
@@ -67,13 +68,61 @@ export function synthesizeSseFromCompletion(completion) {
 }
 
 /**
+ * Shared pool-fallback reroute: hand the request to the configured standby
+ * model (POOL_FALLBACK_MODEL) when the requested model can't be served right
+ * now (pool exhausted, waiting room, transient no-endpoint 404s).
+ *
+ * Returns null when no eligible standby exists — the caller keeps its own
+ * error path — otherwise the nested runCompletion result with the served-by
+ * note attached (JSON body `freebuff_served_by` + `x-freebuff-served-by`
+ * header; streams carry it on the result for the HTTP layer's headers).
+ * Mutates `fallback.used` exactly once so a reroute never chains twice.
+ */
+async function rerouteToFallback({ registry, runs, log, model, payload, wantStream, signal, fallback, eligible, reason, note = {}, endSessionFirst = false }) {
+  const alt = fallback?.preferredModel;
+  if (!fallback || fallback.used || !alt || alt === model) return null;
+  if (!eligible.has(alt) || !registry.agentForModel(alt)) return null;
+  fallback.used = true;
+  if (endSessionFirst) {
+    // Drop the bound session so the standby re-admits fresh instead of
+    // inheriting a session locked to the previous model.
+    try {
+      await runs.sessions.end(runs.token).catch(() => {});
+    } catch { /* best effort */ }
+  }
+  log.warn(`falling back from ${model} to ${alt} (reason: ${reason})`);
+  const r = await runCompletion({
+    registry,
+    runs,
+    log,
+    model: alt,
+    payload: { ...payload, model: alt },
+    wantStream,
+    signal,
+    fallback,
+  });
+  const noteBody = { requested: model, served_by: alt, reason, ...note };
+  if (r.kind === 'json' && r.body && !r.body.error) {
+    r.body.freebuff_served_by = noteBody;
+    r.headers = { ...(r.headers || {}), 'x-freebuff-served-by': alt };
+  } else if (r.kind === 'sse') {
+    // Streams can't carry a JSON note; expose the reroute on the result
+    // so the HTTP layer can set response headers before pumping.
+    r.headers = { 'x-freebuff-served-by': alt };
+    r.servedBy = noteBody;
+  }
+  return r;
+}
+
+/**
  * Execute a chat completion end-to-end with retries across tokens/runs/sessions.
  * Returns { kind:'sse', stream } | { kind:'json', status, body, retryAfterMs? }.
  *
  * `fallback` (optional): { preferredModel } — when the requested model's pool
- * is exhausted (SessionRateLimitedError), re-route to preferredModel if it
- * differs. The served model is reported in the response body (`freebuff_served_by`)
- * and the `x-freebuff-served-by` header so clients stay informed.
+ * is exhausted (SessionRateLimitedError) or upstream's router transiently has
+ * no endpoint for it, re-route to preferredModel if it differs. The served
+ * model is reported in the response body (`freebuff_served_by`) and the
+ * `x-freebuff-served-by` header so clients stay informed.
  */
 export async function runCompletion({ registry, runs, log, model, payload, wantStream, signal, fallback }) {
   const agentId = registry.agentForModel(model);
@@ -88,7 +137,6 @@ export async function runCompletion({ registry, runs, log, model, payload, wantS
   // Fallback eligibility is config-driven (POOL_FALLBACK_ELIGIBLE) so it can't
   // drift from deployments that add or retire unlimited-pool models.
   const FALLBACK_ELIGIBLE = new Set(Array.isArray(config.POOL_FALLBACK_ELIGIBLE) ? config.POOL_FALLBACK_ELIGIBLE : []);
-  let servedByNote = null;
 
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -160,10 +208,7 @@ export async function runCompletion({ registry, runs, log, model, payload, wantS
         };
       }
       if (cls === 'run') {
-        let code = '';
-        try {
-          code = JSON.parse(errText)?.error || '';
-        } catch { /* not json */ }
+        const code = parseUpstreamError(errText).code;
         if (code === 'model_locked' || code === 'session_model_mismatch' || code === 'free_mode_legacy_luna_agent') {
           // Session bound to another model OR admitted under a retired agent:
           // end it upstream and re-admit fresh so the new session picks up the
@@ -177,6 +222,36 @@ export async function runCompletion({ registry, runs, log, model, payload, wantS
         }
         continue;
       }
+      if (cls === 'no_endpoints') {
+        // Upstream's router temporarily has no provider for this model (the
+        // same model serves fine moments later). Drop the cached run, retry,
+        // and if the blip persists through the last attempt, reroute to the
+        // pool-fallback model instead of surfacing the raw 404.
+        runs.invalidateRunById(usedToken, usedRunId);
+        if (attempt < 2) continue;
+        const r = await rerouteToFallback({
+          registry,
+          runs,
+          log,
+          model,
+          payload,
+          wantStream,
+          signal,
+          fallback,
+          eligible: FALLBACK_ELIGIBLE,
+          reason: 'no_endpoints',
+        });
+        if (r) return r;
+        return {
+          kind: 'json',
+          status: 503,
+          body: openaiError(
+            `upstream currently has no provider endpoint for "${model}" — retry shortly or switch models`,
+            'no_endpoints',
+          ),
+          retryAfterMs: 30_000,
+        };
+      }
       if (cls === 'auth') {
         runs.markAuthCooldownByToken(usedToken);
         continue; // try another token
@@ -184,10 +259,7 @@ export async function runCompletion({ registry, runs, log, model, payload, wantS
       if (cls === 'blocked') {
         // Structured account/region/quota verdict (country_blocked, banned,
         // ip_capped…): terminal for this model, no retry, NO auth cooldown.
-        let code = '';
-        try {
-          code = JSON.parse(errText)?.error || '';
-        } catch { /* not json */ }
+        const code = parseUpstreamError(errText).code;
         return {
           kind: 'json',
           status: 403,
@@ -227,44 +299,20 @@ export async function runCompletion({ registry, runs, log, model, payload, wantS
         // queue exists precisely because the requested model's tier is busy,
         // and the standby skips it (same remedy as the pool-exhausted path).
         // Otherwise surface 503 + retry-after so the client backs off.
-        const alt = fallback?.preferredModel;
-        if (
-          fallback &&
-          !fallback.used &&
-          alt &&
-          alt !== model &&
-          FALLBACK_ELIGIBLE.has(alt) &&
-          registry.agentForModel(alt)
-        ) {
-          fallback.used = true;
-          // Drop the queued session so the standby re-admits fresh instead of
-          // inheriting a session bound to the queued-for model.
-          try {
-            await runs.sessions.end(runs.token).catch(() => {});
-          } catch { /* best effort */ }
-          const note = { requested: model, served_by: alt, reason: 'waiting_room' };
-          log.warn(`waiting room for ${model} (pos ${e.position}/${e.queueDepth}); falling back to ${alt}`);
-          const r = await runCompletion({
-            registry,
-            runs,
-            log,
-            model: alt,
-            payload: { ...payload, model: alt },
-            wantStream,
-            signal,
-            fallback,
-          });
-          if (r.kind === 'json' && r.body && !r.body.error) {
-            r.body.freebuff_served_by = note;
-            r.headers = { ...(r.headers || {}), 'x-freebuff-served-by': alt };
-          } else if (r.kind === 'sse') {
-            // Streams can't carry a JSON note; expose the reroute on the result
-            // so the HTTP layer can set response headers before pumping.
-            r.headers = { 'x-freebuff-served-by': alt };
-            r.servedBy = note;
-          }
-          return r;
-        }
+        const r = await rerouteToFallback({
+          registry,
+          runs,
+          log,
+          model,
+          payload,
+          wantStream,
+          signal,
+          fallback,
+          eligible: FALLBACK_ELIGIBLE,
+          reason: 'waiting_room',
+          endSessionFirst: true, // standby must re-admit fresh, not inherit the queued-for model's session
+        });
+        if (r) return r;
         return {
           kind: 'json',
           status: 503,
@@ -284,39 +332,20 @@ export async function runCompletion({ registry, runs, log, model, payload, wantS
       if (e instanceof SessionRateLimitedError) {
         // Terminal for this model+account. If a pool-aware fallback is wired
         // and not yet used, re-route to an unlimited model instead of failing.
-        const alt = fallback?.preferredModel;
-        if (
-          fallback &&
-          !fallback.used &&
-          alt &&
-          alt !== model &&
-          FALLBACK_ELIGIBLE.has(alt) &&
-          registry.agentForModel(alt)
-        ) {
-          fallback.used = true;
-          const note = { requested: model, served_by: alt, reason: 'pool_exhausted', quota: e.info };
-          log.warn(`pool exhausted for ${model}; falling back to ${alt}`);
-          const r = await runCompletion({
-            registry,
-            runs,
-            log,
-            model: alt,
-            payload: { ...payload, model: alt },
-            wantStream,
-            signal,
-            fallback,
-          });
-          if (r.kind === 'json' && r.body && !r.body.error) {
-            r.body.freebuff_served_by = note;
-            r.headers = { ...(r.headers || {}), 'x-freebuff-served-by': alt };
-          } else if (r.kind === 'sse') {
-            // Streams can't carry a JSON note; expose the reroute on the result
-            // so the HTTP layer can set response headers before pumping.
-            r.headers = { 'x-freebuff-served-by': alt };
-            r.servedBy = note;
-          }
-          return r;
-        }
+        const r = await rerouteToFallback({
+          registry,
+          runs,
+          log,
+          model,
+          payload,
+          wantStream,
+          signal,
+          fallback,
+          eligible: FALLBACK_ELIGIBLE,
+          reason: 'pool_exhausted',
+          note: { quota: e.info },
+        });
+        if (r) return r;
         return {
           kind: 'json',
           status: 429,
