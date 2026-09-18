@@ -20,6 +20,10 @@ export class RunManager {
     this.sessions = new SessionManager(logger, { debounceMs: config.DEBOUNCE_MS, maxQueueWaitMs: config.WAITING_ROOM_MAX_WAIT_MS });
     this.token = null;
     this.runs = new Map(); // agentId -> { id, startedAt, inflight, requests }
+    // Run-rotation lock: startRun+FINISH must not interleave. Concurrent
+    // acquire() calls for the same agent share ONE in-flight rotation
+    // promise, so two completions never race into two upstream runs.
+    this.rotating = new Map(); // agentId -> Promise<run>
     this.shuttingDown = false;
     this.lastError = null;
     // Idle-refund reaper: an open session is billed for its full hour
@@ -48,7 +52,14 @@ export class RunManager {
     let run = this.runs.get(agentId);
     const ageMin = run ? (Date.now() - run.startedAt) / 60_000 : Infinity;
     if (!run || ageMin >= this.cfg.ROTATION_INTERVAL_MIN) {
-      run = await this._restartRun(agentId);
+      // Share one rotation per agent: the first caller starts it, later
+      // callers await the same promise instead of starting a second run.
+      let rotating = this.rotating.get(agentId);
+      if (!rotating) {
+        rotating = this._restartRun(agentId).finally(() => this.rotating.delete(agentId));
+        this.rotating.set(agentId, rotating);
+      }
+      run = await rotating;
     }
     run.inflight++;
     run.requests++;

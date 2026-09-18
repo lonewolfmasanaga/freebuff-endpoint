@@ -26,14 +26,6 @@ export class ModelRegistry {
     this._timer = null;
   }
 
-  _load() {
-    const c = loadCatalog({ tier: this.tier });
-    this.modelToAgent = c.models || {};
-    this.source = c.source;
-    this.updatedAt = c.updatedAt;
-  }
-
-  /** Async variant that prefers a fresh remote fetch when the CLI is absent. */
   async _loadAsync() {
     const c = await loadCatalog({ tier: this.tier, remoteUrl: this.remoteUrl });
     this.modelToAgent = c.models || {};
@@ -59,9 +51,12 @@ export class ModelRegistry {
     this._timer = null;
   }
 
-  /** Force a synchronous re-read (used by the admin refresh endpoint). */
-  refresh() {
-    this._load();
+  /** Re-read the catalog (used by the admin refresh endpoint). */
+  async refresh() {
+    // Await the load: loadCatalog is async (remote fetch), and treating the
+    // returned Promise as a catalog used to WIPE modelToAgent to {} — a manual
+    // refresh bricked the gateway with 0 models until the next restart.
+    await this._loadAsync();
     this.log.info(`catalog manually refreshed: ${Object.keys(this.modelToAgent).length} model(s)`);
     return { source: this.source, models: this.models() };
   }

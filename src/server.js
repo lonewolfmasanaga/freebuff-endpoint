@@ -225,8 +225,10 @@ async function handleRequest(req, res) {
   }
 
   // Live catalog control: force the registry to re-read the CLI binary.
+  // await: refresh() re-fetches the catalog async and the result payload needs
+  // the reloaded map, not a Promise (a floating refresh returned 0 models).
   if (p === '/admin/refresh-catalog' && req.method === 'POST') {
-    const result = registry.refresh();
+    const result = await registry.refresh();
     return sendJson(res, 200, { ok: true, source: result.source, models: result.models });
   }
 

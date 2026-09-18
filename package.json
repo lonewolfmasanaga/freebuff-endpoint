@@ -6,7 +6,9 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "lint": "node --check src/server.js && node --check src/openai.js && node --check src/anthropic.js && node --check src/impersonate.js && node --check src/registry.js && node --check src/http-client.js && node --check src/runs.js && node --check src/upstream.js && node --check src/session.js && node --check src/config.js && node --check src/errors.js && node --check src/dashboard.js && echo lint-ok"
+    "lint": "node --check src/server.js && node --check src/openai.js && node --check src/anthropic.js && node --check src/impersonate.js && node --check src/registry.js && node --check src/http-client.js && node --check src/runs.js && node --check src/upstream.js && node --check src/session.js && node --check src/config.js && node --check src/errors.js && node --check src/dashboard.js && node --check src/catalog.js && echo lint-ok",
+    "test": "node --test tests/*.mjs",
+    "test:sets": "node tests/test-a-set.mjs && node tests/test-b-set.mjs && node tests/test-c-registry.mjs && node tests/test-d-set.mjs"
   },
   "engines": {
     "node": ">=20.11"

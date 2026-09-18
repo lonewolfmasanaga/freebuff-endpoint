@@ -12,8 +12,9 @@ COPY src ./src
 ENV NODE_ENV=production
 EXPOSE 8090
 
-# /health answers immediately once the listener is up
+# /healthz is the unauthenticated liveness probe — /health sits behind
+# API_KEYS and would fail the container once keys are configured.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:8090/health >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1:8090/healthz >/dev/null || exit 1
 
 CMD ["node", "src/server.js"]
